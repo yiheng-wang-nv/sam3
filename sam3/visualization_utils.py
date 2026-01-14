@@ -4,6 +4,8 @@
 import json
 import os
 import subprocess
+import tempfile
+import shutil
 from pathlib import Path
 
 import cv2
@@ -469,34 +471,48 @@ def save_masklet_video(video_frames, outputs, out_path, alpha=0.5, fps=10):
     # Each outputs dict has keys: "out_boxes_xywh", "out_probs", "out_obj_ids", "out_binary_masks"
     # video_frames: list of video frame data, same length as outputs_list
 
-    # Read first frame to get size
-    first_img = load_frame(video_frames[0])
-    height, width = first_img.shape[:2]
-    if first_img.dtype == np.float32 or first_img.max() <= 1.0:
-        first_img = (first_img * 255).astype(np.uint8)
-    # Use 'mp4v' for best compatibility with VSCode playback (.mp4 files)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter("temp.mp4", fourcc, fps, (width, height))
+    # Create a temporary directory to store frames
+    tmp_dir = tempfile.mkdtemp()
+    
+    try:
+        outputs_list = [
+            (video_frames[frame_idx], frame_idx, outputs[frame_idx])
+            for frame_idx in sorted(outputs.keys())
+        ]
 
-    outputs_list = [
-        (video_frames[frame_idx], frame_idx, outputs[frame_idx])
-        for frame_idx in sorted(outputs.keys())
-    ]
+        # Save frames as images
+        for frame, frame_idx, frame_outputs in tqdm(outputs_list):
+            img = load_frame(frame)
+            overlay = render_masklet_frame(
+                img, frame_outputs, frame_idx=frame_idx, alpha=alpha
+            )
+            # Save as high quality JPEG
+            cv2.imwrite(
+                os.path.join(tmp_dir, f"{frame_idx:05d}.jpg"), 
+                cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
+                [cv2.IMWRITE_JPEG_QUALITY, 100]
+            )
 
-    for frame, frame_idx, frame_outputs in tqdm(outputs_list):
-        img = load_frame(frame)
-        overlay = render_masklet_frame(
-            img, frame_outputs, frame_idx=frame_idx, alpha=alpha
-        )
-        writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        # Use ffmpeg to create video from images
+        # Changed codec to libopenh264 which is available in your environment
+        # libx264 is missing
+        subprocess.run([
+            "ffmpeg", 
+            "-y", 
+            "-framerate", str(fps),
+            "-i", os.path.join(tmp_dir, "%05d.jpg"),
+            "-c:v", "libopenh264", # Switch to available codec
+            "-allow_skip_frames", "1", # Sometimes needed for openh264
+            "-pix_fmt", "yuv420p",
+            # "-crf" is not supported by openh264, use -b:v for bitrate if needed, or default
+            out_path
+        ])
+        print(f"High-quality video saved to {out_path}")
 
-    writer.release()
-
-    # Re-encode the video for VSCode compatibility using ffmpeg
-    subprocess.run(["ffmpeg", "-y", "-i", "temp.mp4", out_path])
-    print(f"Re-encoded video saved to {out_path}")
-
-    os.remove("temp.mp4")  # Clean up temporary file
+    finally:
+        # Clean up temporary directory
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
 
 
 def save_masklet_image(frame, outputs, out_path, alpha=0.5, frame_idx=None):
