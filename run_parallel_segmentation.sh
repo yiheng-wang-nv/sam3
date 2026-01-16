@@ -4,9 +4,9 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Configuration
-CHECKPOINT="/localhome/local-vennw/code/3rd_sam3/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/orca-dev-galbot-1/galbot_lerobot_dataset/task7_20260106_no_rnd_lerobot/videos/chunk-000"
-BASE_OUTPUT_DIR="${SCRIPT_DIR}/output/task7_segmentation"
+CHECKPOINT="sam3.pt"
+BASE_DIR="/localhome/local-vennw/code/galbot_lerobot_dataset/task7_20260106_merged_lerobot/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/galbot_lerobot_dataset/task7_20260106_merged_lerobot/sam3_output"
 
 # Define cameras
 CAMERAS=(
@@ -21,7 +21,7 @@ PROMPTS=("blue table" "robotic arm(s)" "silver box")
 
 # GPU Selection (Optional: specific IDs like "0 1 2 3")
 # Leave empty to let the script detect all available GPUs
-GPU_IDS="0 1 2 3" 
+GPU_IDS="0 1 2" 
 
 echo "🚀 Starting Parallel Segmentation Job"
 echo "-------------------------------------"
