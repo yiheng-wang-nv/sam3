@@ -2,9 +2,10 @@
 Postprocess segmentation masks to fill small holes and remove noise.
 
 Usage:
-    python postprocess_masks.py
-    python postprocess_masks.py --min_hole_size 100 --min_object_size 50
-    python postprocess_masks.py --closing_iterations 2
+    python postprocess_masks.py \
+    --fill_interior_class 1,3 \
+    --fill_interior_target 4 \
+    --overwrite
 """
 
 import argparse
@@ -212,13 +213,13 @@ def process_directory(input_dir: Path,
 def main():
     parser = argparse.ArgumentParser(description='Postprocess segmentation masks')
     parser.add_argument('--input_dir', type=str, 
-                        default='/localhome/local-vennw/code/sam3_dataset/task7_segmentation',
+                        default='/localhome/local-vennw/code/galbot_lerobot_dataset/task7_20260106_merged_lerobot/sam3_output',
                         help='Input directory containing camera subdirectories')
     parser.add_argument('--num_classes', type=int, default=4,
                         help='Number of classes including background (default: 4)')
-    parser.add_argument('--min_hole_size', type=int, default=64,
+    parser.add_argument('--min_hole_size', type=int, default=0,
                         help='Fill holes smaller than this (pixels, default: 64)')
-    parser.add_argument('--min_object_size', type=int, default=50,
+    parser.add_argument('--min_object_size', type=int, default=0,
                         help='Remove objects smaller than this (pixels, default: 50)')
     parser.add_argument('--closing_iterations', type=int, default=1,
                         help='Morphological closing iterations (default: 1)')
