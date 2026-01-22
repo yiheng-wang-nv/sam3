@@ -40,3 +40,6 @@ python "${SCRIPT_DIR}/batch_run_parallel.py" \
     --gpu_ids $GPU_IDS
 
 echo "🎉 Batch segmentation job finished!"
+
+# upload to hf
+#  hf upload-large-folder --repo-type dataset nvidia/orca-template1-dev task7_20260106_no_rnd_lerobot_with_mask/
