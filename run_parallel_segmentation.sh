@@ -5,8 +5,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Configuration
 CHECKPOINT="sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/galbot_lerobot_dataset/task7_20260106_merged_lerobot/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/galbot_lerobot_dataset/task7_20260106_merged_lerobot/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged/sam3_output"
 
 # Define cameras
 CAMERAS=(
@@ -43,3 +43,5 @@ echo "🎉 Batch segmentation job finished!"
 
 # upload to hf
 #  hf upload-large-folder --repo-type dataset nvidia/orca-template1-dev task7_20260106_no_rnd_lerobot_with_mask/
+
+# then run process_sam3_mask_to_cosmos.sh and postprocess_masks.py

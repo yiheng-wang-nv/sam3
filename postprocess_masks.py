@@ -2,14 +2,19 @@
 Postprocess segmentation masks to fill small holes and remove noise.
 
 Usage:
-    python postprocess_masks.py \
-    --fill_interior_class 1,3 \
-    --fill_interior_target 4 \
-    --overwrite
+python /localhome/local-vennw/code/sam3/postprocess_masks.py \
+  --input_dir /localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged/sam3_output \
+  --fill_interior_class 1,3 \
+  --fill_interior_target 4 \
+  --overwrite \
+  --copy_to_dataset_root /localhome/local-vennw/code/orca-template1-dev/task3_01210122_merged_with_mask
+
 """
 
 import argparse
 import numpy as np
+import re
+import shutil
 from pathlib import Path
 from tqdm import tqdm
 from scipy import ndimage
@@ -210,10 +215,117 @@ def process_directory(input_dir: Path,
     print(f"Done! Processed masks saved as *_masks_post.npz")
 
 
+def _build_episode_to_chunk_map(dataset_root: Path) -> dict[str, str]:
+    data_root = dataset_root / "data"
+    if not data_root.exists():
+        return {}
+    mapping: dict[str, str] = {}
+    for chunk_dir in sorted(data_root.glob("chunk-*")):
+        for parquet_file in chunk_dir.glob("episode_*.parquet"):
+            episode_id = parquet_file.stem.replace("episode_", "")
+            if episode_id in mapping and mapping[episode_id] != chunk_dir.name:
+                raise ValueError(
+                    f"Episode {episode_id} appears in multiple chunks: "
+                    f"{mapping[episode_id]} and {chunk_dir.name}"
+                )
+            mapping[episode_id] = chunk_dir.name
+    return mapping
+
+
+def copy_postprocessed_masks(
+    sam3_output_dir: Path,
+    dataset_root: Path,
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """
+    Copy *_masks_post.npz from sam3_output into dataset_root/masks/<chunk>/<camera>/.
+    Renames *_masks_post.npz -> *_masks.npz.
+    """
+    if not sam3_output_dir.exists():
+        raise FileNotFoundError(f"Missing sam3_output: {sam3_output_dir}")
+    masks_root = dataset_root / "masks"
+    masks_root.mkdir(parents=True, exist_ok=True)
+
+    episode_to_chunk = _build_episode_to_chunk_map(dataset_root)
+    camera_dirs = [d for d in sam3_output_dir.iterdir() if d.is_dir() and "observation.images" in d.name]
+    if not camera_dirs:
+        raise ValueError(f"No camera directories found in {sam3_output_dir}")
+
+    copied = 0
+    skipped = 0
+    missing_episode = 0
+    pattern = re.compile(r"episode_(\d+)_masks_post\.npz$")
+
+    for camera_dir in sorted(camera_dirs):
+        for mask_file in sorted(camera_dir.glob("*_masks_post.npz")):
+            match = pattern.match(mask_file.name)
+            if not match:
+                continue
+            episode_id = match.group(1)
+            chunk = episode_to_chunk.get(episode_id)
+            if chunk is None and episode_to_chunk:
+                missing_episode += 1
+                continue
+            if chunk is None:
+                chunk = "chunk-000"
+            dest_dir = masks_root / chunk / camera_dir.name
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_name = mask_file.name.replace("_masks_post.npz", "_masks.npz")
+            dest_path = dest_dir / dest_name
+            if dest_path.exists() and not overwrite:
+                skipped += 1
+                continue
+            if not dry_run:
+                shutil.copy2(mask_file, dest_path)
+            copied += 1
+
+    print("=" * 50)
+    print("Copy Postprocessed Masks")
+    print("=" * 50)
+    print(f"sam3_output: {sam3_output_dir}")
+    print(f"dataset_root: {dataset_root}")
+    print(f"dry_run: {dry_run}")
+    print(f"copied: {copied}")
+    print(f"skipped: {skipped}")
+    print(f"missing_episode: {missing_episode}")
+    print("=" * 50)
+
+
+def copy_dataset_folders(
+    src_root: Path,
+    dest_root: Path,
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> None:
+    folders = ["data", "meta", "videos"]
+    print("=" * 50)
+    print("Copy Dataset Folders")
+    print("=" * 50)
+    print(f"source_root: {src_root}")
+    print(f"dest_root: {dest_root}")
+    print(f"dry_run: {dry_run}")
+    for folder in folders:
+        src_dir = src_root / folder
+        dest_dir = dest_root / folder
+        if not src_dir.exists():
+            print(f"skip (missing): {src_dir}")
+            continue
+        if dest_dir.exists() and not overwrite:
+            print(f"skip (exists): {dest_dir}")
+            continue
+        if not dry_run:
+            if dest_dir.exists() and overwrite:
+                shutil.rmtree(dest_dir)
+            shutil.copytree(src_dir, dest_dir, dirs_exist_ok=overwrite)
+        print(f"copied: {folder}")
+    print("=" * 50)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Postprocess segmentation masks')
     parser.add_argument('--input_dir', type=str, 
-                        default='/localhome/local-vennw/code/galbot_lerobot_dataset/task7_20260106_merged_lerobot/sam3_output',
+                        default='/localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged/sam3_output',
                         help='Input directory containing camera subdirectories')
     parser.add_argument('--num_classes', type=int, default=4,
                         help='Number of classes including background (default: 4)')
@@ -231,6 +343,16 @@ def main():
                         help='New class label for filled interior (default: 4)')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing *_masks_post.npz files')
+    parser.add_argument('--copy_to_dataset_root', type=str, default=None,
+                        help='After postprocess, copy *_masks_post.npz to <dataset_root>/masks/')
+    parser.add_argument('--copy_only', action='store_true',
+                        help='Only copy postprocessed masks, skip postprocess')
+    parser.add_argument('--copy_dataset_folders', action='store_true',
+                        help='Copy data/meta/videos from dataset root (input_dir parent)')
+    parser.add_argument('--source_dataset_root', type=str, default=None,
+                        help='Explicit source dataset root for data/meta/videos')
+    parser.add_argument('--dry_run', action='store_true',
+                        help='Print copy summary without copying files')
     
     args = parser.parse_args()
     
@@ -241,44 +363,61 @@ def main():
     if args.fill_interior_class is not None:
         fill_interior_classes = [int(x.strip()) for x in args.fill_interior_class.split(',')]
     
-    print("="*50)
-    print("Mask Postprocessing")
-    print("="*50)
-    print(f"Input: {input_dir}")
-    print(f"Parameters:")
-    print(f"  - fill_holes: {not args.no_fill_holes}")
-    print(f"  - min_hole_size: {args.min_hole_size}")
-    print(f"  - min_object_size: {args.min_object_size}")
-    print(f"  - closing_iterations: {args.closing_iterations}")
-    if fill_interior_classes is not None:
-        class_names = {1: 'red', 2: 'green', 3: 'blue'}
-        class_str = ', '.join([f"{c}({class_names.get(c, '?')})" for c in fill_interior_classes])
-        print(f"  - fill_interior: classes [{class_str}] interior -> {args.fill_interior_target}")
-    print("="*50)
-    
-    # Find all camera subdirectories
-    camera_dirs = [d for d in input_dir.iterdir() if d.is_dir() and 'observation.images' in d.name]
-    
-    if not camera_dirs:
-        print(f"No camera directories found in {input_dir}")
-        return
-    
-    print(f"Found {len(camera_dirs)} camera directories")
-    
-    for camera_dir in camera_dirs:
-        process_directory(
-            camera_dir,
-            num_classes=args.num_classes,
-            fill_holes=not args.no_fill_holes,
-            min_hole_size=args.min_hole_size,
-            min_object_size=args.min_object_size,
-            closing_iterations=args.closing_iterations,
-            fill_interior_class=fill_interior_classes,
-            fill_interior_target=args.fill_interior_target,
+    if not args.copy_only:
+        print("="*50)
+        print("Mask Postprocessing")
+        print("="*50)
+        print(f"Input: {input_dir}")
+        print(f"Parameters:")
+        print(f"  - fill_holes: {not args.no_fill_holes}")
+        print(f"  - min_hole_size: {args.min_hole_size}")
+        print(f"  - min_object_size: {args.min_object_size}")
+        print(f"  - closing_iterations: {args.closing_iterations}")
+        if fill_interior_classes is not None:
+            class_names = {1: 'red', 2: 'green', 3: 'blue'}
+            class_str = ', '.join([f"{c}({class_names.get(c, '?')})" for c in fill_interior_classes])
+            print(f"  - fill_interior: classes [{class_str}] interior -> {args.fill_interior_target}")
+        print("="*50)
+
+        # Find all camera subdirectories
+        camera_dirs = [d for d in input_dir.iterdir() if d.is_dir() and 'observation.images' in d.name]
+
+        if not camera_dirs:
+            print(f"No camera directories found in {input_dir}")
+            return
+
+        print(f"Found {len(camera_dirs)} camera directories")
+
+        for camera_dir in camera_dirs:
+            process_directory(
+                camera_dir,
+                num_classes=args.num_classes,
+                fill_holes=not args.no_fill_holes,
+                min_hole_size=args.min_hole_size,
+                min_object_size=args.min_object_size,
+                closing_iterations=args.closing_iterations,
+                fill_interior_class=fill_interior_classes,
+                fill_interior_target=args.fill_interior_target,
+                overwrite=args.overwrite,
+            )
+
+        print("\nAll done!")
+
+    if args.copy_to_dataset_root:
+        copy_postprocessed_masks(
+            sam3_output_dir=input_dir,
+            dataset_root=Path(args.copy_to_dataset_root),
             overwrite=args.overwrite,
+            dry_run=args.dry_run,
         )
-    
-    print("\nAll done!")
+        if args.copy_dataset_folders:
+            source_root = Path(args.source_dataset_root) if args.source_dataset_root else input_dir.parent
+            copy_dataset_folders(
+                src_root=source_root,
+                dest_root=Path(args.copy_to_dataset_root),
+                overwrite=args.overwrite,
+                dry_run=args.dry_run,
+            )
 
 
 if __name__ == "__main__":

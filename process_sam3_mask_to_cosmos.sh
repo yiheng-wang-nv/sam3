@@ -1,8 +1,7 @@
 #!/bin/bash
-cd /localhome/local-vennw/code
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate dev
 
-BASE_DIR="/localhome/local-vennw/code/galbot_lerobot_dataset/task7_20260106_merged_lerobot/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged/sam3_output"
 
 # 处理所有四个子目录
 for subdir in \
