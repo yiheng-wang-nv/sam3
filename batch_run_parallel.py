@@ -24,7 +24,27 @@ def chunk_list(data, num_chunks):
         last += avg
     return out
 
-def run_worker(gpu_id, video_list, checkpoint, prompts, base_output_dir, script_dir):
+def run_worker(
+    gpu_id,
+    video_list,
+    checkpoint,
+    prompts,
+    base_output_dir,
+    script_dir,
+    points=None,
+    point_labels=None,
+    points_frame_idx=None,
+    points_by_frame=None,
+    point_labels_by_frame=None,
+    save_video=False,
+    save_side_by_side=False,
+    max_frames=None,
+    save_npz=False,
+    npz_separate=False,
+    no_pkl=False,
+    debug_one=False,
+    invert_mask=False,
+):
     """Worker function for GPU-based segmentation inference (PKL only, no video)"""
     
     env = os.environ.copy()
@@ -56,6 +76,31 @@ def run_worker(gpu_id, video_list, checkpoint, prompts, base_output_dir, script_
             "--output_dir", output_dir,
             "--prompts"
         ] + prompts
+
+        if points:
+            cmd += ["--points", points]
+        if point_labels:
+            cmd += ["--point_labels", point_labels]
+        if points_frame_idx is not None:
+            cmd += ["--points_frame_idx", str(points_frame_idx)]
+        if points_by_frame:
+            cmd += ["--points_by_frame", points_by_frame]
+        if point_labels_by_frame:
+            cmd += ["--point_labels_by_frame", point_labels_by_frame]
+        if save_video:
+            cmd += ["--save_video"]
+        if save_side_by_side:
+            cmd += ["--save_side_by_side"]
+        if max_frames is not None:
+            cmd += ["--max_frames", str(max_frames)]
+        if save_npz:
+            cmd += ["--save_npz"]
+        if npz_separate:
+            cmd += ["--npz_separate"]
+        if no_pkl:
+            cmd += ["--no_pkl"]
+        if invert_mask:
+            cmd += ["--invert_mask"]
         
         try:
             subprocess.run(cmd, env=env, check=True)
@@ -72,6 +117,20 @@ if __name__ == "__main__":
     parser.add_argument("--prompts", nargs="+", required=True, help="Prompts list")
     parser.add_argument("--cameras", nargs="+", required=True, help="List of camera folder names to scan")
     parser.add_argument("--gpu_ids", nargs="+", type=int, default=None, help="Specific GPU IDs to use. If None, uses all available.")
+    parser.add_argument("--points", type=str, default=None, help="Extra points as 'x1,y1;x2,y2;...'.")
+    parser.add_argument("--point_labels", type=str, default=None, help="Point labels as '1,0,1,...'.")
+    parser.add_argument("--points_frame_idx", type=int, default=None, help="Frame index for points.")
+    parser.add_argument("--points_by_frame", type=str, default=None, help="Multiple frames: 'frame: x1,y1;...|frame: x1,y1;...'.")
+    parser.add_argument("--point_labels_by_frame", type=str, default=None, help="Labels per frame: 'frame:1,0|frame:1,1'.")
+    parser.add_argument("--save_video", action="store_true", help="Save visualization videos.")
+    parser.add_argument("--save_side_by_side", action="store_true", help="Save side-by-side videos.")
+    parser.add_argument("--max_frames", type=int, default=None, help="Only process first N frames.")
+    parser.add_argument("--save_npz", action="store_true", help="Also save Cosmos npz outputs.")
+    parser.add_argument("--npz_separate", action="store_true", help="Keep objects separate in npz.")
+    parser.add_argument("--no_pkl", action="store_true", help="Do not save pkl outputs.")
+    parser.add_argument("--debug_one", action="store_true", help="Randomly pick one video and run once.")
+    parser.add_argument("--debug_seed", type=int, default=None, help="Random seed for debug_one.")
+    parser.add_argument("--invert_mask", action="store_true", help="Invert masks in outputs.")
     
     args = parser.parse_args()
     
@@ -92,6 +151,14 @@ if __name__ == "__main__":
         
     print(f"Total videos to process: {len(all_videos)}")
     
+    # Debug mode: pick one random video
+    if args.debug_one:
+        import random
+
+        if args.debug_seed is not None:
+            random.seed(args.debug_seed)
+        all_videos = [random.choice(all_videos)]
+
     # 2. Assign GPUs
     if args.gpu_ids:
         gpu_ids = args.gpu_ids
@@ -101,6 +168,8 @@ if __name__ == "__main__":
     print(f"Using GPUs: {gpu_ids}")
     
     # 3. Distribute work across GPUs
+    if args.debug_one:
+        gpu_ids = [gpu_ids[0]]
     chunks = chunk_list(all_videos, len(gpu_ids))
     
     processes = []
@@ -108,7 +177,27 @@ if __name__ == "__main__":
         if i < len(chunks) and chunks[i]:
             p = multiprocessing.Process(
                 target=run_worker,
-                args=(gpu_id, chunks[i], args.checkpoint, args.prompts, args.output_dir, script_dir)
+                args=(
+                    gpu_id,
+                    chunks[i],
+                    args.checkpoint,
+                    args.prompts,
+                    args.output_dir,
+                    script_dir,
+                    args.points,
+                    args.point_labels,
+                    args.points_frame_idx,
+                    args.points_by_frame,
+                    args.point_labels_by_frame,
+                    args.save_video,
+                    args.save_side_by_side,
+                    args.max_frames,
+                    args.save_npz,
+                    args.npz_separate,
+                    args.no_pkl,
+                    args.debug_one,
+                    args.invert_mask,
+                )
             )
             processes.append(p)
             p.start()

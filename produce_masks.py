@@ -3,10 +3,102 @@ import torch
 import cv2
 import glob
 import os
+import shutil
 import argparse
 import pickle
-from sam3.visualization_utils import save_masklet_video
+from sam3.visualization_utils import load_frame, render_masklet_frame, save_masklet_video
 from sam3.model_builder import build_sam3_video_predictor
+
+
+def parse_points(points_str):
+    if not points_str:
+        return []
+    points = []
+    for item in points_str.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        x_str, y_str = item.split(",")
+        points.append((float(x_str), float(y_str)))
+    return points
+
+
+def parse_labels(labels_str, num_points):
+    if not labels_str:
+        return [1] * num_points
+    labels = [int(x.strip()) for x in labels_str.split(",") if x.strip()]
+    if len(labels) != num_points:
+        raise ValueError(
+            f"labels length {len(labels)} does not match points length {num_points}"
+        )
+    return labels
+
+
+def parse_points_by_frame(points_by_frame_str):
+    if not points_by_frame_str:
+        return {}
+    points_by_frame = {}
+    for entry in points_by_frame_str.split("|"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        frame_str, points_str = entry.split(":", 1)
+        frame_idx = int(frame_str)
+        points_by_frame[frame_idx] = parse_points(points_str)
+    return points_by_frame
+
+
+def parse_labels_by_frame(labels_by_frame_str):
+    if not labels_by_frame_str:
+        return {}
+    labels_by_frame = {}
+    for entry in labels_by_frame_str.split("|"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        frame_str, labels_str = entry.split(":", 1)
+        frame_idx = int(frame_str)
+        labels_by_frame[frame_idx] = [
+            int(x.strip()) for x in labels_str.split(",") if x.strip()
+        ]
+    return labels_by_frame
+
+
+def outputs_to_npz(outputs, output_path, merge_objects, default_hw):
+    frame_indices = sorted(outputs.keys())
+    if not frame_indices:
+        print("No outputs available for npz conversion.")
+        return None
+
+    first_frame = outputs[frame_indices[0]]
+    if first_frame["out_binary_masks"].size > 0:
+        _, h, w = first_frame["out_binary_masks"].shape
+    else:
+        h, w = default_hw
+
+    if merge_objects:
+        all_masks = np.zeros((len(frame_indices), h, w), dtype=np.uint8)
+        for t, frame_idx in enumerate(frame_indices):
+            frame_data = outputs[frame_idx]
+            binary_masks = frame_data["out_binary_masks"]
+            obj_ids = frame_data["out_obj_ids"]
+            for mask, obj_id in zip(binary_masks, obj_ids):
+                label = int(obj_id) + 1
+                all_masks[t][mask] = label
+        output_data = all_masks
+    else:
+        max_objects = max(len(outputs[idx]["out_obj_ids"]) for idx in frame_indices)
+        all_masks = np.zeros((max_objects, len(frame_indices), h, w), dtype=np.uint8)
+        for t, frame_idx in enumerate(frame_indices):
+            frame_data = outputs[frame_idx]
+            binary_masks = frame_data["out_binary_masks"]
+            for obj_idx, mask in enumerate(binary_masks):
+                all_masks[obj_idx, t] = mask.astype(np.uint8) * 255
+        output_data = all_masks
+
+    np.savez_compressed(output_path, arr_0=output_data)
+    print(f"Saved npz: {output_path}")
+    return output_path
 
 def parse_args():
     parser = argparse.ArgumentParser(description="SAM3 Video Segmentation")
@@ -46,14 +138,76 @@ def parse_args():
         action="store_true",
         help="Whether to save the visualization video"
     )
+    parser.add_argument(
+        "--save_side_by_side",
+        action="store_true",
+        help="Save side-by-side video (original | mask overlay).",
+    )
+    parser.add_argument(
+        "--points",
+        type=str,
+        default="",
+        help="Extra point prompts as 'x1,y1;x2,y2;...'. Treated as one extra category.",
+    )
+    parser.add_argument(
+        "--point_labels",
+        type=str,
+        default="",
+        help="Point labels as '1,0,1,...' (1=positive, 0=negative).",
+    )
+    parser.add_argument(
+        "--points_frame_idx",
+        type=int,
+        default=0,
+        help="Frame index to apply the point prompts.",
+    )
+    parser.add_argument(
+        "--points_by_frame",
+        type=str,
+        default="",
+        help="Multiple frames: 'frame: x1,y1;...|frame: x1,y1;...'.",
+    )
+    parser.add_argument(
+        "--point_labels_by_frame",
+        type=str,
+        default="",
+        help="Labels per frame: 'frame:1,0|frame:1,1'.",
+    )
+    parser.add_argument(
+        "--max_frames",
+        type=int,
+        default=None,
+        help="Only process the first N frames (for quick debug).",
+    )
+    parser.add_argument(
+        "--save_npz",
+        action="store_true",
+        help="Also save Cosmos-compatible npz from the pkl output.",
+    )
+    parser.add_argument(
+        "--npz_separate",
+        action="store_true",
+        help="Keep objects separate in npz (N,T,H,W). Default merges objects.",
+    )
+    parser.add_argument(
+        "--no_pkl",
+        action="store_true",
+        help="Do not save pkl output.",
+    )
+    parser.add_argument(
+        "--invert_mask",
+        action="store_true",
+        help="Invert masks: all predicted labels -> 0, background -> 1.",
+    )
     return parser.parse_args()
 
-def propagate_in_video(predictor, session_id):
+def propagate_in_video(predictor, session_id, max_frames=None):
     outputs_per_frame = {}
     for response in predictor.handle_stream_request(
         request=dict(
             type="propagate_in_video",
             session_id=session_id,
+            max_frame_num_to_track=max_frames,
         )
     ):
         outputs_per_frame[response["frame_index"]] = response["outputs"]
@@ -84,12 +238,14 @@ def main():
     if isinstance(video_path, str) and video_path.endswith(".mp4"):
         cap = cv2.VideoCapture(video_path)
         video_frames_for_vis = []
-        if args.save_video:
+        if args.save_video or args.save_side_by_side:
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
                 video_frames_for_vis.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                if args.max_frames is not None and len(video_frames_for_vis) >= args.max_frames:
+                    break
         else:
             # Just read one frame to get dimensions
             ret, frame = cap.read()
@@ -106,14 +262,25 @@ def main():
             print(f"Falling back to lexicographic sort for frames.")
             video_frames_for_vis.sort()
         
-        if not args.save_video and video_frames_for_vis:
+        if not (args.save_video or args.save_side_by_side) and video_frames_for_vis:
              # Just keep one for dimension check if needed
              # Actually glob just returns paths, so memory is fine.
              pass
+        elif (args.save_video or args.save_side_by_side) and args.max_frames is not None:
+            video_frames_for_vis = video_frames_for_vis[: args.max_frames]
 
     if not video_frames_for_vis:
         print("Error: No frames found!")
         return
+
+    # Get frame dimensions for point conversion
+    if isinstance(video_frames_for_vis[0], np.ndarray):
+        H, W = video_frames_for_vis[0].shape[:2]
+    elif isinstance(video_frames_for_vis[0], str):
+        img = cv2.imread(video_frames_for_vis[0])
+        H, W = img.shape[:2]
+    else:
+        H, W = 480, 640
 
     # Initialize SAM3 session
     response = video_predictor.handle_request(
@@ -148,7 +315,9 @@ def main():
         )
 
         # Propagate
-        outputs_per_frame = propagate_in_video(video_predictor, session_id)
+        outputs_per_frame = propagate_in_video(
+            video_predictor, session_id, max_frames=args.max_frames
+        )
         
         # Merge this prompt's results
         for frame_idx, frame_data in outputs_per_frame.items():
@@ -165,27 +334,146 @@ def main():
                 local_ids = np.full(num_objs, prompt_idx, dtype=np.int64)
                 
                 merged_outputs[frame_idx]['out_obj_ids'].append(local_ids)
-                merged_outputs[frame_idx]['out_probs'].append(frame_data['out_probs'])
+                merged_outputs[frame_idx]['out_probs'].append(
+                    np.array(frame_data['out_probs'], dtype=np.float32).reshape(-1)
+                )
                 merged_outputs[frame_idx]['out_boxes_xywh'].append(frame_data['out_boxes_xywh'])
                 merged_outputs[frame_idx]['out_binary_masks'].append(frame_data['out_binary_masks'])
 
+    # Optional: extra category from points (SAM3 tracker, no pre-propagation needed)
+    points_frames = {}
+    labels_frames = {}
+    points_by_frame = parse_points_by_frame(args.points_by_frame)
+    labels_by_frame = parse_labels_by_frame(args.point_labels_by_frame)
+
+    for frame_idx, pts in points_by_frame.items():
+        if not pts:
+            continue
+        lbls = labels_by_frame.get(frame_idx, [1] * len(pts))
+        if len(lbls) != len(pts):
+            raise ValueError(
+                f"labels length {len(lbls)} does not match points length {len(pts)} "
+                f"for frame {frame_idx}"
+            )
+        points_frames[frame_idx] = list(pts)
+        labels_frames[frame_idx] = list(lbls)
+
+    if args.points:
+        points_abs = parse_points(args.points)
+        labels = parse_labels(args.point_labels, len(points_abs))
+        if points_abs:
+            if args.points_frame_idx in points_frames:
+                points_frames[args.points_frame_idx].extend(points_abs)
+                labels_frames[args.points_frame_idx].extend(labels)
+            else:
+                points_frames[args.points_frame_idx] = list(points_abs)
+                labels_frames[args.points_frame_idx] = list(labels)
+
+    if points_frames:
+        print(f"Processing points as extra category: {points_frames}")
+        tracker = video_predictor.model.tracker
+        tracker.backbone = video_predictor.model.detector.backbone
+
+        inference_state_points = tracker.init_state(video_path=video_path)
+        tracker.clear_all_points_in_video(inference_state_points)
+
+        for frame_idx, points_abs in points_frames.items():
+            if args.max_frames is not None and frame_idx >= args.max_frames:
+                print(
+                    f"Skipping points for frame {frame_idx} >= max_frames {args.max_frames}"
+                )
+                continue
+            labels = labels_frames[frame_idx]
+            rel_points = [[x / W, y / H] for x, y in points_abs]
+            points_tensor = torch.tensor(rel_points, dtype=torch.float32)
+            labels_tensor = torch.tensor(labels, dtype=torch.int32)
+
+            tracker.add_new_points_or_box(
+                inference_state=inference_state_points,
+                frame_idx=frame_idx,
+                obj_id=1,
+                points=points_tensor,
+                labels=labels_tensor,
+                clear_old_points=False,
+                rel_coordinates=True,
+            )
+
+        points_outputs = {}
+        start_frame_idx = min(points_frames.keys())
+        max_track = (
+            args.max_frames - start_frame_idx
+            if args.max_frames is not None
+            else inference_state_points["num_frames"]
+        )
+        if max_track is not None and max_track <= 0:
+            print(
+                f"Skipping points propagation: start_frame_idx={start_frame_idx} "
+                f">= max_frames={args.max_frames}"
+            )
+            points_outputs = {}
+        else:
+            points_outputs = {}
+            for (
+                frame_idx,
+                obj_ids,
+                _,
+                video_res_masks,
+                obj_scores,
+            ) in tracker.propagate_in_video(
+                inference_state_points,
+                start_frame_idx=start_frame_idx,
+                max_frame_num_to_track=max_track,
+                reverse=False,
+                propagate_preflight=True,
+            ):
+                if args.max_frames is not None and frame_idx >= args.max_frames:
+                    continue
+                if len(obj_ids) == 0:
+                    continue
+                masks = (video_res_masks > 0.0).to(torch.bool).cpu().numpy()
+                if masks.ndim == 4:
+                    masks = masks[:, 0]
+                if torch.is_tensor(obj_scores):
+                    scores = obj_scores.detach().float().cpu().numpy().astype(np.float32)
+                else:
+                    scores = np.array(obj_scores, dtype=np.float32).reshape(-1)
+                points_outputs[frame_idx] = {
+                    "out_obj_ids": np.array(obj_ids, dtype=np.int64),
+                    "out_probs": scores,
+                    "out_boxes_xywh": np.zeros((len(obj_ids), 4), dtype=np.float32),
+                    "out_binary_masks": masks,
+                }
+
+        prompt_idx = len(prompts_list)
+        for frame_idx, frame_data in points_outputs.items():
+            if frame_idx not in merged_outputs:
+                merged_outputs[frame_idx] = {
+                    "out_obj_ids": [],
+                    "out_probs": [],
+                    "out_boxes_xywh": [],
+                    "out_binary_masks": [],
+                }
+            num_objs = len(frame_data["out_obj_ids"])
+            if num_objs > 0:
+                local_ids = np.full(num_objs, prompt_idx, dtype=np.int64)
+                merged_outputs[frame_idx]["out_obj_ids"].append(local_ids)
+                merged_outputs[frame_idx]["out_probs"].append(
+                    np.array(frame_data["out_probs"], dtype=np.float32).reshape(-1)
+                )
+                merged_outputs[frame_idx]["out_boxes_xywh"].append(
+                    frame_data["out_boxes_xywh"]
+                )
+                merged_outputs[frame_idx]["out_binary_masks"].append(
+                    frame_data["out_binary_masks"]
+                )
+
     # Format merged outputs
     final_formatted_outputs = {}
-    
-    # Get frame dimensions
-    if len(video_frames_for_vis) > 0:
-        if isinstance(video_frames_for_vis[0], np.ndarray):
-            H, W = video_frames_for_vis[0].shape[:2]
-        elif isinstance(video_frames_for_vis[0], str):
-             img = cv2.imread(video_frames_for_vis[0])
-             H, W = img.shape[:2]
-        else:
-             H, W = 480, 640
-    else:
-        H, W = 480, 640 
 
     print("Merging results...")
     for frame_idx in merged_outputs.keys():
+        if args.max_frames is not None and frame_idx >= args.max_frames:
+            continue
         data_lists = merged_outputs[frame_idx]
         if len(data_lists['out_obj_ids']) > 0:
             final_formatted_outputs[frame_idx] = {
@@ -201,15 +489,44 @@ def main():
                 'out_boxes_xywh': np.zeros((0, 4), dtype=np.float32),
                 'out_binary_masks': np.zeros((0, H, W), dtype=bool)
             }
+
+    # Disable bounding box rendering by zeroing boxes
+    for frame_idx, frame_data in final_formatted_outputs.items():
+        num_objs = len(frame_data["out_obj_ids"])
+        frame_data["out_boxes_xywh"] = np.zeros((num_objs, 4), dtype=np.float32)
+
+    # Optional: invert masks to keep background as label 1
+    if args.invert_mask:
+        print("Inverting masks: predicted -> 0, background -> 1")
+        for frame_idx, frame_data in final_formatted_outputs.items():
+            if frame_data["out_binary_masks"].size > 0:
+                combined = np.any(frame_data["out_binary_masks"], axis=0)
+            else:
+                combined = np.zeros((H, W), dtype=bool)
+            inverted = ~combined
+            frame_data["out_binary_masks"] = inverted.reshape(1, H, W)
+            frame_data["out_obj_ids"] = np.array([0], dtype=np.int64)
+            frame_data["out_probs"] = np.array([1.0], dtype=np.float32)
+            frame_data["out_boxes_xywh"] = np.zeros((1, 4), dtype=np.float32)
             
-    # Save raw results (pickle)
     raw_output_path = os.path.join(args.output_dir, f"{video_name}_segmentation_results.pkl")
-    print(f"Saving raw segmentation results to {raw_output_path} ...")
-    with open(raw_output_path, 'wb') as f:
-        pickle.dump(final_formatted_outputs, f)
+    if not args.no_pkl:
+        print(f"Saving raw segmentation results to {raw_output_path} ...")
+        with open(raw_output_path, 'wb') as f:
+            pickle.dump(final_formatted_outputs, f)
+
+    # Optional: save Cosmos-compatible npz directly from outputs
+    if args.save_npz:
+        npz_output_path = os.path.join(args.output_dir, f"{video_name}_masks.npz")
+        outputs_to_npz(
+            final_formatted_outputs,
+            npz_output_path,
+            merge_objects=not args.npz_separate,
+            default_hw=(H, W),
+        )
 
     # Save visualization video ONLY if requested
-    if args.save_video:
+    if args.save_video or args.save_side_by_side:
         # If we didn't load all frames earlier, we need to reload them now
         # Check if video_frames_for_vis contains enough frames
         # This simple check assumes if we loaded > 1 frame, we loaded the video.
@@ -231,15 +548,75 @@ def main():
                 video_frames_for_vis.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             cap.release()
 
-        output_video_path = os.path.join(args.output_dir, f"{video_name}_vis.mp4")
-        print(f"Saving video to {output_video_path} ...")
+        if args.save_video:
+            output_video_path = os.path.join(args.output_dir, f"{video_name}_vis.mp4")
+            print(f"Saving video to {output_video_path} ...")
 
-        save_masklet_video(
-            video_frames=video_frames_for_vis, 
-            outputs=final_formatted_outputs, 
-            out_path=output_video_path, 
-            fps=args.fps
-        )
+            if shutil.which("ffmpeg") is not None:
+                save_masklet_video(
+                    video_frames=video_frames_for_vis,
+                    outputs=final_formatted_outputs,
+                    out_path=output_video_path,
+                    fps=args.fps,
+                    show_frame_idx=False,
+                )
+            else:
+                print("ffmpeg not found. Falling back to OpenCV video writer.")
+                if len(video_frames_for_vis) == 0:
+                    print("No frames available for video writing.")
+                else:
+                    first_frame = load_frame(video_frames_for_vis[0])
+                    height, width = first_frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    writer = cv2.VideoWriter(
+                        output_video_path, fourcc, args.fps, (width, height)
+                    )
+                    for frame_idx in sorted(final_formatted_outputs.keys()):
+                        if args.max_frames is not None and frame_idx >= args.max_frames:
+                            continue
+                        frame = load_frame(video_frames_for_vis[frame_idx])
+                        overlay = render_masklet_frame(
+                            frame,
+                            final_formatted_outputs[frame_idx],
+                            frame_idx=None,
+                        )
+                        writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+                    writer.release()
+                    print(f"Video saved (OpenCV) to {output_video_path}")
+
+        if args.save_side_by_side:
+            output_compare_path = os.path.join(
+                args.output_dir, f"{video_name}_compare.mp4"
+            )
+            print(f"Saving side-by-side video to {output_compare_path} ...")
+            if len(video_frames_for_vis) == 0:
+                print("No frames available for side-by-side video.")
+            else:
+                first_frame = load_frame(video_frames_for_vis[0])
+                height, width = first_frame.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(
+                    output_compare_path, fourcc, args.fps, (width * 2, height)
+                )
+                for frame_idx in sorted(final_formatted_outputs.keys()):
+                    if args.max_frames is not None and frame_idx >= args.max_frames:
+                        continue
+                    frame = load_frame(video_frames_for_vis[frame_idx])
+                    overlay = render_masklet_frame(
+                        frame,
+                        final_formatted_outputs[frame_idx],
+                        frame_idx=None,
+                    )
+                    masks = final_formatted_outputs[frame_idx]["out_binary_masks"]
+                    if masks.size > 0:
+                        combined = np.any(masks, axis=0)
+                    else:
+                        combined = np.zeros(frame.shape[:2], dtype=bool)
+                    overlay[~combined] = 0
+                    compare = np.concatenate([frame, overlay], axis=1)
+                    writer.write(cv2.cvtColor(compare, cv2.COLOR_RGB2BGR))
+                writer.release()
+                print(f"Side-by-side video saved to {output_compare_path}")
     else:
         print("Skipping video generation (--save_video not set).")
 

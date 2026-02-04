@@ -3,11 +3,11 @@ Postprocess segmentation masks to fill small holes and remove noise.
 
 Usage:
 python /localhome/local-vennw/code/sam3/postprocess_masks.py \
-  --input_dir /localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged/sam3_output \
+  --input_dir /localhome/local-vennw/code/task7_20260122_trimmed/sam3_output \
   --fill_interior_class 1,3 \
   --fill_interior_target 4 \
   --overwrite \
-  --copy_to_dataset_root /localhome/local-vennw/code/orca-template1-dev/task3_01210122_merged_with_mask
+  --copy_to_dataset_root /localhome/local-vennw/code/task7_20260122_trimmed
 
 """
 

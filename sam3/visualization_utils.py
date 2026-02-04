@@ -467,7 +467,9 @@ def render_masklet_frame(img, outputs, frame_idx=None, alpha=0.5):
     return overlay
 
 
-def save_masklet_video(video_frames, outputs, out_path, alpha=0.5, fps=10):
+def save_masklet_video(
+    video_frames, outputs, out_path, alpha=0.5, fps=10, show_frame_idx=True
+):
     # Each outputs dict has keys: "out_boxes_xywh", "out_probs", "out_obj_ids", "out_binary_masks"
     # video_frames: list of video frame data, same length as outputs_list
 
@@ -484,7 +486,10 @@ def save_masklet_video(video_frames, outputs, out_path, alpha=0.5, fps=10):
         for frame, frame_idx, frame_outputs in tqdm(outputs_list):
             img = load_frame(frame)
             overlay = render_masklet_frame(
-                img, frame_outputs, frame_idx=frame_idx, alpha=alpha
+                img,
+                frame_outputs,
+                frame_idx=frame_idx if show_frame_idx else None,
+                alpha=alpha,
             )
             # Save as high quality JPEG
             cv2.imwrite(

@@ -3,8 +3,8 @@ Visualize original frames vs masks for multiple cameras.
 
 Example:
 python /localhome/local-vennw/code/sam3/visualize_masks.py \
-  --dataset_root /localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged \
-  --mask_root /localhome/local-vennw/code/orca_dataset/galbot_lerobot_dataset/task3_01210122_merged/sam3_output \
+  --dataset_root /localhome/local-vennw/code/task7_20260122_trimmed \
+  --mask_root /localhome/local-vennw/code/task7_20260122_trimmed/sam3_output \
   --use_post_masks \
   --frames 0,10,20 \
   --cameras observation.images.head_left_camera_color_optical_frame,observation.images.right_arm_camera_color_optical_frame \
@@ -14,9 +14,11 @@ python /localhome/local-vennw/code/sam3/visualize_masks.py \
 from __future__ import annotations
 
 import argparse
+import random
 import re
 from pathlib import Path
 
+import cv2
 import imageio.v2 as imageio
 import numpy as np
 from PIL import Image
@@ -63,6 +65,52 @@ def _colorize_mask(mask: np.ndarray) -> np.ndarray:
     return colored
 
 
+def _to_label_mask(mask: np.ndarray) -> np.ndarray:
+    if mask.ndim == 2:
+        return mask
+    if mask.ndim == 3:
+        num_objects, h, w = mask.shape
+        labels = np.zeros((h, w), dtype=np.uint8)
+        for obj_idx in range(num_objects):
+            labels[mask[obj_idx] > 0] = obj_idx + 1
+        return labels
+    raise ValueError(f"Unexpected mask shape: {mask.shape}")
+
+
+def _write_overlay_video(
+    video_path: Path,
+    masks: np.ndarray,
+    output_path: Path,
+    fps: int,
+    max_frames: int | None,
+) -> None:
+    reader = imageio.get_reader(str(video_path))
+    writer = None
+    try:
+        max_idx = masks.shape[1] - 1 if masks.ndim == 4 else masks.shape[0] - 1
+        if max_frames is not None:
+            max_idx = min(max_idx, max_frames - 1)
+        for idx, frame in enumerate(reader):
+            if idx > max_idx:
+                break
+            if masks.ndim == 4:
+                mask = masks[:, idx]
+            else:
+                mask = masks[idx]
+            label_mask = _to_label_mask(mask)
+            colored_mask = _colorize_mask(label_mask)
+            overlay = (0.6 * frame + 0.4 * colored_mask).astype(np.uint8)
+            if writer is None:
+                height, width = overlay.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+            writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+    finally:
+        reader.close()
+        if writer is not None:
+            writer.release()
+
+
 def _find_chunk_for_episode(dataset_root: Path, camera: str, episode_id: str) -> str | None:
     for chunk_dir in sorted((dataset_root / "videos").glob("chunk-*")):
         candidate = chunk_dir / camera / f"episode_{episode_id}.mp4"
@@ -79,6 +127,11 @@ def visualize_masks(
     frame_indices: list[int],
     episode_id: str | None = None,
     use_post_masks: bool = True,
+    save_video: bool = False,
+    videos_per_camera: int = 1,
+    seed: int | None = None,
+    fps: int = 10,
+    max_frames: int | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     camera_dirs = [d for d in mask_root.iterdir() if d.is_dir() and "observation.images" in d.name]
@@ -93,40 +146,58 @@ def visualize_masks(
         if not mask_files:
             continue
         if episode_id:
-            mask_files = [m for m in mask_files if f"episode_{episode_id}" in m.name]
-            if not mask_files:
+            selected = [m for m in mask_files if f"episode_{episode_id}" in m.name]
+        else:
+            if seed is not None:
+                random.seed(seed)
+            sample_count = min(max(videos_per_camera, 1), len(mask_files))
+            selected = random.sample(mask_files, sample_count)
+
+        for mask_file in selected:
+            match = re.match(r"episode_(\d+)_masks", mask_file.name)
+            if not match:
                 continue
-        mask_file = mask_files[0]
-        match = re.match(r"episode_(\d+)_masks", mask_file.name)
-        if not match:
-            continue
-        current_episode = match.group(1)
-        chunk = _find_chunk_for_episode(dataset_root, camera_dir.name, current_episode)
-        if chunk is None:
-            chunk = "chunk-000"
-        video_path = (
-            dataset_root
-            / "videos"
-            / chunk
-            / camera_dir.name
-            / f"episode_{current_episode}.mp4"
-        )
-        if not video_path.exists():
-            continue
-
-        masks = np.load(mask_file)["arr_0"]
-        frames = _load_video_frames(video_path, frame_indices)
-
-        for frame_idx, frame in frames.items():
-            if frame_idx >= masks.shape[0]:
+            current_episode = match.group(1)
+            chunk = _find_chunk_for_episode(dataset_root, camera_dir.name, current_episode)
+            if chunk is None:
+                chunk = "chunk-000"
+            video_path = (
+                dataset_root
+                / "videos"
+                / chunk
+                / camera_dir.name
+                / f"episode_{current_episode}.mp4"
+            )
+            if not video_path.exists():
                 continue
-            mask = masks[frame_idx]
-            colored_mask = _colorize_mask(mask)
-            overlay = (0.6 * frame + 0.4 * colored_mask).astype(np.uint8)
 
-            canvas = np.concatenate([frame, colored_mask, overlay], axis=1)
-            out_name = f"{camera_dir.name}_episode_{current_episode}_frame_{frame_idx}.png"
-            Image.fromarray(canvas).save(output_dir / out_name)
+            masks = np.load(mask_file)["arr_0"]
+
+            if save_video:
+                out_name = f"{camera_dir.name}_episode_{current_episode}_overlay.mp4"
+                _write_overlay_video(
+                    video_path,
+                    masks,
+                    output_dir / out_name,
+                    fps=fps,
+                    max_frames=max_frames,
+                )
+                continue
+
+            frames = _load_video_frames(video_path, frame_indices)
+
+            for frame_idx, frame in frames.items():
+                max_idx = masks.shape[1] if masks.ndim == 4 else masks.shape[0]
+                if frame_idx >= max_idx:
+                    continue
+                mask = masks[:, frame_idx] if masks.ndim == 4 else masks[frame_idx]
+                label_mask = _to_label_mask(mask)
+                colored_mask = _colorize_mask(label_mask)
+                overlay = (0.6 * frame + 0.4 * colored_mask).astype(np.uint8)
+
+                canvas = np.concatenate([frame, colored_mask, overlay], axis=1)
+                out_name = f"{camera_dir.name}_episode_{current_episode}_frame_{frame_idx}.png"
+                Image.fromarray(canvas).save(output_dir / out_name)
 
 
 def main() -> None:
@@ -138,6 +209,11 @@ def main() -> None:
     parser.add_argument("--frames", type=str, default="0,10,20", help="Comma-separated frame indices")
     parser.add_argument("--episode_id", type=str, default=None, help="Episode id, e.g. 000000")
     parser.add_argument("--use_post_masks", action="store_true", help="Use *_masks_post.npz")
+    parser.add_argument("--save_video", action="store_true", help="Save overlay video instead of frames")
+    parser.add_argument("--videos_per_camera", type=int, default=1, help="Number of episodes per camera")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for episode sampling")
+    parser.add_argument("--fps", type=int, default=10, help="FPS for output videos")
+    parser.add_argument("--max_frames", type=int, default=None, help="Limit frames for video output")
     args = parser.parse_args()
 
     cameras = [c.strip() for c in args.cameras.split(",")] if args.cameras else []
@@ -151,6 +227,11 @@ def main() -> None:
         frame_indices=frame_indices,
         episode_id=args.episode_id,
         use_post_masks=args.use_post_masks,
+        save_video=args.save_video,
+        videos_per_camera=args.videos_per_camera,
+        seed=args.seed,
+        fps=args.fps,
+        max_frames=args.max_frames,
     )
 
 

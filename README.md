@@ -66,7 +66,7 @@ This breakthrough is driven by an innovative data engine that has automatically 
 1. **Create a new Conda environment:**
 
 ```bash
-conda create -n sam3 python=3.12
+conda create -n sam3 python=3.12 -y
 conda deactivate
 conda activate sam3
 ```
