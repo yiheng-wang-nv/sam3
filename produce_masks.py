@@ -8,6 +8,7 @@ import argparse
 import pickle
 from sam3.visualization_utils import load_frame, render_masklet_frame, save_masklet_video
 from sam3.model_builder import build_sam3_video_predictor
+from postprocess_masks import postprocess_video_masks
 
 
 def parse_points(points_str):
@@ -100,6 +101,68 @@ def outputs_to_npz(outputs, output_path, merge_objects, default_hw):
     print(f"Saved npz: {output_path}")
     return output_path
 
+
+def outputs_to_label_masks(outputs, default_hw):
+    frame_indices = sorted(outputs.keys())
+    if not frame_indices:
+        return np.zeros((0, *default_hw), dtype=np.uint8), []
+
+    first_frame = outputs[frame_indices[0]]
+    if first_frame["out_binary_masks"].size > 0:
+        _, h, w = first_frame["out_binary_masks"].shape
+    else:
+        h, w = default_hw
+
+    label_masks = np.zeros((len(frame_indices), h, w), dtype=np.uint8)
+    for t, frame_idx in enumerate(frame_indices):
+        frame_data = outputs[frame_idx]
+        binary_masks = frame_data["out_binary_masks"]
+        obj_ids = frame_data["out_obj_ids"]
+        for mask, obj_id in zip(binary_masks, obj_ids):
+            label = int(obj_id) + 1
+            label_masks[t][mask] = label
+    return label_masks, frame_indices
+
+
+def label_masks_to_outputs(label_masks, frame_indices):
+    outputs = {}
+    if len(frame_indices) == 0:
+        return outputs
+    _, h, w = label_masks.shape
+    for t, frame_idx in enumerate(frame_indices):
+        frame_mask = label_masks[t]
+        labels = np.unique(frame_mask)
+        labels = labels[labels > 0]
+        if labels.size == 0:
+            outputs[frame_idx] = {
+                "out_obj_ids": np.array([], dtype=np.int64),
+                "out_probs": np.array([], dtype=np.float32),
+                "out_boxes_xywh": np.zeros((0, 4), dtype=np.float32),
+                "out_binary_masks": np.zeros((0, h, w), dtype=bool),
+            }
+            continue
+        masks = []
+        obj_ids = []
+        for label in labels:
+            masks.append(frame_mask == label)
+            obj_ids.append(int(label) - 1)
+        outputs[frame_idx] = {
+            "out_obj_ids": np.array(obj_ids, dtype=np.int64),
+            "out_probs": np.ones(len(obj_ids), dtype=np.float32),
+            "out_boxes_xywh": np.zeros((len(obj_ids), 4), dtype=np.float32),
+            "out_binary_masks": np.stack(masks, axis=0),
+        }
+    return outputs
+
+
+def _parse_class_list(value):
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    return [int(x.strip()) for x in value.split(",") if x.strip()]
+
 def parse_args():
     parser = argparse.ArgumentParser(description="SAM3 Video Segmentation")
     parser.add_argument(
@@ -132,6 +195,114 @@ def parse_args():
         type=int, 
         default=30,
         help="FPS for output video"
+    )
+    parser.add_argument(
+        "--postprocess_for_vis",
+        action="store_true",
+        help="Apply postprocess to masks for visualization only."
+    )
+    parser.add_argument(
+        "--pp_min_hole_size",
+        type=int,
+        default=64,
+        help="Postprocess: fill holes smaller than this."
+    )
+    parser.add_argument(
+        "--pp_min_object_size",
+        type=int,
+        default=50,
+        help="Postprocess: remove objects smaller than this."
+    )
+    parser.add_argument(
+        "--pp_closing_iterations",
+        type=int,
+        default=1,
+        help="Postprocess: closing iterations."
+    )
+    parser.add_argument(
+        "--pp_no_fill_holes",
+        action="store_true",
+        help="Postprocess: disable hole filling."
+    )
+    parser.add_argument(
+        "--pp_no_remove_small_objects",
+        action="store_true",
+        help="Postprocess: disable removing small objects."
+    )
+    parser.add_argument(
+        "--pp_union_hole_fill",
+        action="store_true",
+        help="Postprocess: fill holes based on union of all >0 classes."
+    )
+    parser.add_argument(
+        "--pp_union_gap_fill",
+        action="store_true",
+        help="Postprocess: fill thin background gaps using union closing."
+    )
+    parser.add_argument(
+        "--pp_union_gap_closing_iterations",
+        type=int,
+        default=1,
+        help="Postprocess: union gap fill closing iterations."
+    )
+    parser.add_argument(
+        "--pp_fill_blue_table_quadrant",
+        action="store_true",
+        help="Postprocess: fill black region in blue table quadrant."
+    )
+    parser.add_argument(
+        "--pp_blue_table_label",
+        type=int,
+        default=1,
+        help="Postprocess: blue table label id."
+    )
+    parser.add_argument(
+        "--pp_blue_table_target",
+        type=int,
+        default=4,
+        help="Postprocess: target label for blue table quadrant fill."
+    )
+    parser.add_argument(
+        "--pp_blue_table_quadrant_mode",
+        type=str,
+        default="right_down",
+        help="Postprocess: quadrant fill mode (right_down or left_down)."
+    )
+    parser.add_argument(
+        "--pp_blue_table_y_pad_top",
+        type=int,
+        default=60,
+        help="Postprocess: top padding rows to exclude."
+    )
+    parser.add_argument(
+        "--pp_blue_table_y_pad_bottom",
+        type=int,
+        default=60,
+        help="Postprocess: bottom padding rows to exclude."
+    )
+    parser.add_argument(
+        "--pp_blue_table_skip_if_label_above",
+        type=int,
+        default=None,
+        help="Postprocess: skip quadrant fill if this label is higher than blue table."
+    )
+    parser.add_argument(
+        "--pp_blue_table_skip_if_label_area_gt",
+        type=int,
+        default=None,
+        help="Postprocess: skip quadrant fill if skip label area exceeds this pixel count."
+    )
+    parser.add_argument(
+        "--pp_fill_interior_class",
+        type=str,
+        default=None,
+        help='Postprocess: fill background inside these class contours, e.g. "1,3".'
+    )
+    parser.add_argument(
+        "--pp_fill_interior_target",
+        type=int,
+        default=4,
+        help="Postprocess: target class for interior fill."
     )
     parser.add_argument(
         "--save_video", 
@@ -525,6 +696,41 @@ def main():
             default_hw=(H, W),
         )
 
+    vis_outputs = final_formatted_outputs
+    if args.postprocess_for_vis:
+        label_masks, frame_indices = outputs_to_label_masks(
+            final_formatted_outputs, default_hw=(H, W)
+        )
+        if label_masks.size > 0:
+            max_label = int(label_masks.max())
+            num_classes = max_label + 1
+        else:
+            num_classes = 1
+        fill_classes = _parse_class_list(args.pp_fill_interior_class)
+        processed = postprocess_video_masks(
+            label_masks,
+            num_classes=num_classes,
+            fill_holes=not args.pp_no_fill_holes,
+            min_hole_size=args.pp_min_hole_size,
+            min_object_size=args.pp_min_object_size,
+            closing_iterations=args.pp_closing_iterations,
+            fill_interior_class=fill_classes,
+            fill_interior_target=args.pp_fill_interior_target,
+            union_hole_fill=args.pp_union_hole_fill,
+            remove_small_objects_enabled=not args.pp_no_remove_small_objects,
+            union_gap_fill=args.pp_union_gap_fill,
+            union_gap_closing_iterations=args.pp_union_gap_closing_iterations,
+            fill_blue_table_quadrant_enabled=args.pp_fill_blue_table_quadrant,
+            blue_table_label=args.pp_blue_table_label,
+            blue_table_target=args.pp_blue_table_target,
+            blue_table_quadrant_mode=args.pp_blue_table_quadrant_mode,
+            blue_table_y_pad_top=args.pp_blue_table_y_pad_top,
+            blue_table_y_pad_bottom=args.pp_blue_table_y_pad_bottom,
+            blue_table_skip_if_label_above=args.pp_blue_table_skip_if_label_above,
+            blue_table_skip_if_label_area_gt=args.pp_blue_table_skip_if_label_area_gt,
+        )
+        vis_outputs = label_masks_to_outputs(processed, frame_indices)
+
     # Save visualization video ONLY if requested
     if args.save_video or args.save_side_by_side:
         # If we didn't load all frames earlier, we need to reload them now
@@ -555,7 +761,7 @@ def main():
             if shutil.which("ffmpeg") is not None:
                 save_masklet_video(
                     video_frames=video_frames_for_vis,
-                    outputs=final_formatted_outputs,
+                    outputs=vis_outputs,
                     out_path=output_video_path,
                     fps=args.fps,
                     show_frame_idx=False,
@@ -571,13 +777,13 @@ def main():
                     writer = cv2.VideoWriter(
                         output_video_path, fourcc, args.fps, (width, height)
                     )
-                    for frame_idx in sorted(final_formatted_outputs.keys()):
+                    for frame_idx in sorted(vis_outputs.keys()):
                         if args.max_frames is not None and frame_idx >= args.max_frames:
                             continue
                         frame = load_frame(video_frames_for_vis[frame_idx])
                         overlay = render_masklet_frame(
                             frame,
-                            final_formatted_outputs[frame_idx],
+                            vis_outputs[frame_idx],
                             frame_idx=None,
                         )
                         writer.write(cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
@@ -598,16 +804,16 @@ def main():
                 writer = cv2.VideoWriter(
                     output_compare_path, fourcc, args.fps, (width * 2, height)
                 )
-                for frame_idx in sorted(final_formatted_outputs.keys()):
+                for frame_idx in sorted(vis_outputs.keys()):
                     if args.max_frames is not None and frame_idx >= args.max_frames:
                         continue
                     frame = load_frame(video_frames_for_vis[frame_idx])
                     overlay = render_masklet_frame(
                         frame,
-                        final_formatted_outputs[frame_idx],
+                        vis_outputs[frame_idx],
                         frame_idx=None,
                     )
-                    masks = final_formatted_outputs[frame_idx]["out_binary_masks"]
+                    masks = vis_outputs[frame_idx]["out_binary_masks"]
                     if masks.size > 0:
                         combined = np.any(masks, axis=0)
                     else:

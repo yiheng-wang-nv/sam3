@@ -19,13 +19,16 @@ from pathlib import Path
 from tqdm import tqdm
 from scipy import ndimage
 from skimage.morphology import remove_small_objects, remove_small_holes
+import inspect
+import cv2
 
 
 def postprocess_mask_2d(mask, 
                         fill_holes=True,
                         min_hole_size=64,
                         min_object_size=50,
-                        closing_iterations=1):
+                        closing_iterations=1,
+                        remove_small_objects_enabled=True):
     """
     Postprocess a single 2D binary mask.
     
@@ -52,11 +55,21 @@ def postprocess_mask_2d(mask,
     
     # 2. Fill small holes
     if fill_holes and min_hole_size > 0:
-        result = remove_small_holes(result, area_threshold=min_hole_size)
+        holes_kwargs = {}
+        if "max_size" in inspect.signature(remove_small_holes).parameters:
+            holes_kwargs["max_size"] = min_hole_size
+        else:
+            holes_kwargs["area_threshold"] = min_hole_size
+        result = remove_small_holes(result, **holes_kwargs)
     
     # 3. Remove small noise objects
-    if min_object_size > 0:
-        result = remove_small_objects(result, min_size=min_object_size)
+    if remove_small_objects_enabled and min_object_size > 0:
+        objects_kwargs = {}
+        if "max_size" in inspect.signature(remove_small_objects).parameters:
+            objects_kwargs["max_size"] = min_object_size
+        else:
+            objects_kwargs["min_size"] = min_object_size
+        result = remove_small_objects(result, **objects_kwargs)
     
     return result.astype(np.uint8)
 
@@ -64,39 +77,212 @@ def postprocess_mask_2d(mask,
 def fill_interior_with_class(mask, target_classes, fill_class=4):
     """
     Fill background (0) inside the contour of target_classes with fill_class.
-    
-    Rule: Within the outermost boundary of any target_class region,
-          all background pixels (0) become fill_class.
-    
+
+    Rule:
+      1) Fill interiors for each target_class independently.
+      2) Take the UNION of all target_classes plus fill_class, then fill its
+         interior background to fill_class.
+
     Args:
         mask: Multi-class mask (H, W) with labels 0,1,2,3,...
         target_classes: List of classes whose interior to fill (e.g., [1, 3] for red and blue)
                        Can also be a single int for backwards compatibility.
         fill_class: The new class label for interior background (default: 4)
-    
+
     Returns:
         Modified mask with interior filled
     """
     # Handle single int input
     if isinstance(target_classes, int):
         target_classes = [target_classes]
-    
+
     result = mask.copy()
-    
+
+    # Step 1: fill each target class independently
     for target_class in target_classes:
-        binary = (mask == target_class)
-        
+        binary = (result == target_class)
         if binary.sum() == 0:
             continue
-        
-        # Fill holes to get the interior region (everything inside the contour)
         filled = ndimage.binary_fill_holes(binary)
-        
-        # Within the filled region, change background (0) to fill_class
         interior_background = filled & (result == 0)
         result[interior_background] = fill_class
-    
+
+    # Step 2: union of target classes + fill_class, then fill interior once more
+    union_binary = (result == fill_class)
+    for target_class in target_classes:
+        union_binary |= (result == target_class)
+    if union_binary.sum() == 0:
+        return result
+
+    filled_union = ndimage.binary_fill_holes(union_binary)
+    interior_background = filled_union & (result == 0)
+    result[interior_background] = fill_class
+
     return result
+
+
+def fill_blue_table_quadrant(
+    mask,
+    blue_label=1,
+    fill_label=4,
+    mode="right_down",
+    y_pad_top=60,
+    y_pad_bottom=60,
+    skip_if_label_above=None,
+    skip_if_label_area_gt=None,
+    margin=1,
+):
+    """
+    Fill the quadrant region below the blue table's top edge.
+    
+    For mode="right_down" (left arm camera): fills bottom-right region
+    For mode="left_down" (right arm camera): fills bottom-left region
+    
+    Uses two-point strategy with margin.
+    """
+    h, w = mask.shape
+    y_top = int(np.clip(y_pad_top, 0, h - 1))
+    y_bottom = int(np.clip(h - 1 - y_pad_bottom, 0, h - 1))
+    if y_bottom <= y_top:
+        return mask
+
+    # optional skip if another label is higher
+    if skip_if_label_above is not None:
+        other_coords = np.argwhere(mask == skip_if_label_above)
+        if other_coords.size > 0:
+            other_y_min = int(other_coords[:, 0].min())
+            if other_y_min < y_top:
+                return mask
+            if skip_if_label_area_gt is not None:
+                if other_coords.shape[0] > skip_if_label_area_gt:
+                    return mask
+
+    # Two-Point Strategy (with margin & slope check)
+    coords = np.argwhere(mask == blue_label)
+    if coords.size == 0:
+        return mask
+    
+    ys = coords[:, 0]
+    xs = coords[:, 1]
+    
+    # filter blue pixels to valid region
+    valid = (ys >= y_top) & (ys <= y_bottom)
+    ys = ys[valid]
+    xs = xs[valid]
+    if ys.size == 0:
+        return mask
+
+    min_x = int(xs.min())
+    max_x = int(xs.max())
+
+    # Shrink range by margin to avoid edge noise
+    target_x_left = min_x + margin
+    target_x_right = max_x - margin
+
+    if target_x_left >= target_x_right:
+        target_x_left = min_x
+        target_x_right = max_x
+
+    # Find left points
+    valid_left = xs >= target_x_left
+    if not np.any(valid_left): valid_left = xs >= min_x
+    xs_left_subset = xs[valid_left]
+    ys_left_subset = ys[valid_left]
+    current_min_x = int(xs_left_subset.min())
+    left_p_ys = ys_left_subset[xs_left_subset == current_min_x]
+    left_up = (current_min_x, int(left_p_ys.min()))
+    left_down = (current_min_x, int(left_p_ys.max()))
+
+    # Find right points
+    valid_right = xs <= target_x_right
+    if not np.any(valid_right): valid_right = xs <= max_x
+    xs_right_subset = xs[valid_right]
+    ys_right_subset = ys[valid_right]
+    current_max_x = int(xs_right_subset.max())
+    right_p_ys = ys_right_subset[xs_right_subset == current_max_x]
+    right_up = (current_max_x, int(right_p_ys.min()))
+    right_down = (current_max_x, int(right_p_ys.max()))
+
+    def y_on_line_at_x(p1, p2, x):
+        x1, y1 = p1
+        x2, y2 = p2
+        if x2 == x1: return y1
+        t = (x - x1) / float(x2 - x1)
+        return y1 + t * (y2 - y1)
+
+    def x_on_line_at_y(p1, p2, y):
+        x1, y1 = p1
+        x2, y2 = p2
+        if y2 == y1: return x1
+        t = (y - y1) / float(y2 - y1)
+        return x1 + t * (x2 - x1)
+
+    if mode == "right_down":
+        y_right = y_on_line_at_x(left_up, right_up, w - 1)
+        y_right = int(np.clip(round(y_right), y_top, y_bottom))
+
+        x_bottom = x_on_line_at_y(left_up, left_down, y_bottom)
+        x_bottom = int(np.clip(round(x_bottom), 0, w - 1))
+
+        poly = np.array([
+            [left_up[0], left_up[1]],
+            [w - 1, y_right],
+            [w - 1, y_bottom],
+            [x_bottom, y_bottom],
+        ], dtype=np.int32)
+        
+    elif mode == "left_down":
+        y_left = y_on_line_at_x(left_up, right_up, 0)
+        y_left = int(np.clip(round(y_left), y_top, y_bottom))
+
+        x_bottom = x_on_line_at_y(right_up, right_down, y_bottom)
+        x_bottom = int(np.clip(round(x_bottom), 0, w - 1))
+
+        poly = np.array([
+            [right_up[0], right_up[1]],
+            [0, y_left],
+            [0, y_bottom],
+            [x_bottom, y_bottom],
+        ], dtype=np.int32)
+    else:
+        raise ValueError(f"Unknown quadrant mode: {mode}")
+
+    fill_mask = np.zeros_like(mask, dtype=np.uint8)
+    cv2.fillPoly(fill_mask, [poly], 1)
+
+    result = mask.copy()
+    to_fill = (fill_mask == 1) & (result == 0)
+    result[to_fill] = fill_label
+    return result
+
+
+def parse_fill_bg_roi(spec_str):
+    """
+    Parse a fill_bg_roi spec string.
+    Format: "frame_start,frame_end_ratio,y_min,y_max,x_min,x_max,target"
+    
+    frame_start: int, absolute frame index (0-based)
+    frame_end_ratio: float, fraction of total frames (e.g. 0.5 = first half)
+    y_min, y_max: int, row range (inclusive). -1 = full range.
+    x_min, x_max: int, col range (inclusive). -1 = full range.
+    target: int, fill value for background pixels.
+    
+    Returns: tuple (frame_start, frame_end_ratio, y_min, y_max, x_min, x_max, target)
+    """
+    parts = [p.strip() for p in spec_str.split(",")]
+    if len(parts) != 7:
+        raise ValueError(
+            f"fill_bg_roi spec must have 7 comma-separated values "
+            f"(frame_start,frame_end_ratio,y_min,y_max,x_min,x_max,target), got {len(parts)}: {spec_str}"
+        )
+    frame_start = int(parts[0])
+    frame_end_ratio = float(parts[1])
+    y_min = int(parts[2])
+    y_max = int(parts[3])
+    x_min = int(parts[4])
+    x_max = int(parts[5])
+    target = int(parts[6])
+    return (frame_start, frame_end_ratio, y_min, y_max, x_min, x_max, target)
 
 
 def postprocess_video_masks(masks, 
@@ -106,7 +292,20 @@ def postprocess_video_masks(masks,
                             min_object_size=50,
                             closing_iterations=1,
                             fill_interior_class=None,
-                            fill_interior_target=4):
+                            fill_interior_target=4,
+                            union_hole_fill=False,
+                            remove_small_objects_enabled=True,
+                            union_gap_fill=False,
+                            union_gap_closing_iterations=1,
+                            fill_blue_table_quadrant_enabled=False,
+                            blue_table_label=1,
+                            blue_table_target=4,
+                            blue_table_quadrant_mode="right_down",
+                            blue_table_y_pad_top=60,
+                            blue_table_y_pad_bottom=60,
+                            blue_table_skip_if_label_above=None,
+                            blue_table_skip_if_label_area_gt=None,
+                            fill_bg_roi_list=None):
     """
     Postprocess masks for all frames in a video.
     
@@ -118,12 +317,28 @@ def postprocess_video_masks(masks,
         fill_interior_class: If set, fill background inside this class's contour
                             (e.g., 1 for red). None to disable.
         fill_interior_target: The new class label for filled interior (default: 4)
+        fill_bg_roi_list: List of ROI fill specs. Each is a tuple:
+            (frame_start, frame_end_ratio, y_min, y_max, x_min, x_max, target)
+            Fill all background (0) pixels within the ROI with target value
+            for the specified frame range.
     
     Returns:
         Processed masks (T, H, W)
     """
     T, H, W = masks.shape
     result = np.zeros_like(masks)
+    
+    # Precompute ROI frame ranges
+    _roi_ranges = []
+    if fill_bg_roi_list:
+        for roi in fill_bg_roi_list:
+            fs, fer, y0, y1, x0, x1, tgt = roi
+            frame_end = int(T * fer)
+            ry0 = 0 if y0 < 0 else y0
+            ry1 = H if y1 < 0 else min(y1 + 1, H)
+            rx0 = 0 if x0 < 0 else x0
+            rx1 = W if x1 < 0 else min(x1 + 1, W)
+            _roi_ranges.append((fs, frame_end, ry0, ry1, rx0, rx1, tgt))
     
     for t in range(T):
         frame_mask = masks[t]
@@ -136,10 +351,11 @@ def postprocess_video_masks(masks,
             if binary_mask.sum() > 0:
                 processed = postprocess_mask_2d(
                     binary_mask,
-                    fill_holes=fill_holes,
+                    fill_holes=False if union_hole_fill else fill_holes,
                     min_hole_size=min_hole_size,
                     min_object_size=min_object_size,
                     closing_iterations=closing_iterations,
+                    remove_small_objects_enabled=remove_small_objects_enabled,
                 )
                 # Only write where currently background (avoid overwriting)
                 processed_frame = np.where(
@@ -148,6 +364,48 @@ def postprocess_video_masks(masks,
                     processed_frame
                 )
         
+        # Optional union-based hole filling: any holes inside union of >0 become target
+        if union_hole_fill and fill_holes and min_hole_size > 0:
+            union_binary = processed_frame > 0
+            if union_binary.any():
+                holes_kwargs = {}
+                if "max_size" in inspect.signature(remove_small_holes).parameters:
+                    holes_kwargs["max_size"] = min_hole_size
+                else:
+                    holes_kwargs["area_threshold"] = min_hole_size
+                filled_union = remove_small_holes(union_binary, **holes_kwargs)
+                interior_background = filled_union & (processed_frame == 0)
+                processed_frame[interior_background] = fill_interior_target
+
+        # Optional union gap fill: close thin background lines between classes
+        if union_gap_fill and union_gap_closing_iterations > 0:
+            union_binary = processed_frame > 0
+            if union_binary.any():
+                struct = ndimage.generate_binary_structure(2, 1)
+                closed_union = ndimage.binary_closing(
+                    union_binary, structure=struct, iterations=union_gap_closing_iterations
+                )
+                gap = closed_union & (processed_frame == 0)
+                if gap.any():
+                    _, indices = ndimage.distance_transform_edt(
+                        processed_frame == 0, return_indices=True
+                    )
+                    nearest = processed_frame[indices[0], indices[1]]
+                    fill_mask = gap & (nearest > 0)
+                    processed_frame[fill_mask] = nearest[fill_mask]
+
+        if fill_blue_table_quadrant_enabled:
+            processed_frame = fill_blue_table_quadrant(
+                processed_frame,
+                blue_label=blue_table_label,
+                fill_label=blue_table_target,
+                mode=blue_table_quadrant_mode,
+                y_pad_top=blue_table_y_pad_top,
+                y_pad_bottom=blue_table_y_pad_bottom,
+                skip_if_label_above=blue_table_skip_if_label_above,
+                skip_if_label_area_gt=blue_table_skip_if_label_area_gt,
+            )
+
         # Apply interior filling rule: background inside target_class -> fill_class
         if fill_interior_class is not None:
             processed_frame = fill_interior_with_class(
@@ -155,10 +413,74 @@ def postprocess_video_masks(masks,
                 target_classes=fill_interior_class, 
                 fill_class=fill_interior_target
             )
+
+        # Fill background in ROI regions
+        for fs, fe, ry0, ry1, rx0, rx1, tgt in _roi_ranges:
+            if fs <= t < fe:
+                roi = processed_frame[ry0:ry1, rx0:rx1]
+                roi[roi == 0] = tgt
         
         result[t] = processed_frame
     
     return result
+
+
+def _process_single_file(args_tuple):
+    """
+    Process a single mask file. Designed to be called from multiprocessing.Pool.
+    Takes a single tuple argument for compatibility with Pool.imap_unordered.
+    """
+    (mask_file, num_classes, fill_holes, min_hole_size, min_object_size,
+     closing_iterations, fill_interior_class, fill_interior_target,
+     union_hole_fill, remove_small_objects_enabled, union_gap_fill,
+     union_gap_closing_iterations, fill_blue_table_quadrant_enabled,
+     blue_table_label, blue_table_target, blue_table_quadrant_mode,
+     blue_table_y_pad_top, blue_table_y_pad_bottom,
+     blue_table_skip_if_label_above, blue_table_skip_if_label_area_gt,
+     overwrite, fill_bg_roi_list) = args_tuple
+
+    mask_file = Path(mask_file)
+    out_path = mask_file.parent / mask_file.name.replace("_masks.npz", "_masks_post.npz")
+
+    if out_path.exists() and not overwrite:
+        return mask_file.name, "skipped"
+
+    # Load masks
+    data = np.load(mask_file)
+    masks = data['arr_0']  # (T, H, W)
+
+    # Detect number of classes
+    detected_classes = len(np.unique(masks))
+    use_num_classes = max(num_classes, detected_classes)
+
+    # Process
+    processed = postprocess_video_masks(
+        masks,
+        num_classes=use_num_classes,
+        fill_holes=fill_holes,
+        min_hole_size=min_hole_size,
+        min_object_size=min_object_size,
+        closing_iterations=closing_iterations,
+        fill_interior_class=fill_interior_class,
+        fill_interior_target=fill_interior_target,
+        union_hole_fill=union_hole_fill,
+        remove_small_objects_enabled=remove_small_objects_enabled,
+        union_gap_fill=union_gap_fill,
+        union_gap_closing_iterations=union_gap_closing_iterations,
+        fill_blue_table_quadrant_enabled=fill_blue_table_quadrant_enabled,
+        blue_table_label=blue_table_label,
+        blue_table_target=blue_table_target,
+        blue_table_quadrant_mode=blue_table_quadrant_mode,
+        blue_table_y_pad_top=blue_table_y_pad_top,
+        blue_table_y_pad_bottom=blue_table_y_pad_bottom,
+        blue_table_skip_if_label_above=blue_table_skip_if_label_above,
+        blue_table_skip_if_label_area_gt=blue_table_skip_if_label_area_gt,
+        fill_bg_roi_list=fill_bg_roi_list,
+    )
+
+    # Save
+    np.savez_compressed(out_path, processed)
+    return mask_file.name, "done"
 
 
 def process_directory(input_dir: Path,
@@ -169,50 +491,78 @@ def process_directory(input_dir: Path,
                       closing_iterations=1,
                       fill_interior_class=None,
                       fill_interior_target=4,
-                      overwrite=False):
+                      union_hole_fill=False,
+                      remove_small_objects_enabled=True,
+                      union_gap_fill=False,
+                      union_gap_closing_iterations=1,
+                      fill_blue_table_quadrant_enabled=False,
+                      blue_table_label=1,
+                      blue_table_target=4,
+                      blue_table_quadrant_mode="right_down",
+                      blue_table_y_pad_top=60,
+                      blue_table_y_pad_bottom=60,
+                      blue_table_skip_if_label_above=None,
+                      blue_table_skip_if_label_area_gt=None,
+                      overwrite=False,
+                      num_workers=1,
+                      fill_bg_roi_list=None):
     """
     Process all *_masks.npz files in a directory.
     Output: *_masks_post.npz
+    
+    Args:
+        num_workers: Number of parallel workers. 1 = serial (default).
+                     Set to > 1 for multiprocessing parallelism.
+        fill_bg_roi_list: List of ROI fill specs (see parse_fill_bg_roi).
     """
+    import multiprocessing
+
     mask_files = sorted(input_dir.glob("*_masks.npz"))
     
     if not mask_files:
         print(f"No mask files found in {input_dir}")
         return
     
-    print(f"Processing {len(mask_files)} mask files in {input_dir.name}...")
-    
-    for mask_file in tqdm(mask_files, desc=input_dir.name):
-        # Output path: episode_000000_masks.npz -> episode_000000_masks_post.npz
-        out_path = mask_file.parent / mask_file.name.replace("_masks.npz", "_masks_post.npz")
-        
-        if out_path.exists() and not overwrite:
-            continue
-        
-        # Load masks
-        data = np.load(mask_file)
-        masks = data['arr_0']  # (T, H, W)
-        
-        # Detect number of classes
-        detected_classes = len(np.unique(masks))
-        use_num_classes = max(num_classes, detected_classes)
-        
-        # Process
-        processed = postprocess_video_masks(
-            masks,
-            num_classes=use_num_classes,
-            fill_holes=fill_holes,
-            min_hole_size=min_hole_size,
-            min_object_size=min_object_size,
-            closing_iterations=closing_iterations,
-            fill_interior_class=fill_interior_class,
-            fill_interior_target=fill_interior_target,
-        )
-        
-        # Save
-        np.savez_compressed(out_path, processed)
-    
-    print(f"Done! Processed masks saved as *_masks_post.npz")
+    print(f"Processing {len(mask_files)} mask files in {input_dir.name} (workers={num_workers})...")
+
+    # Build argument tuples for each file
+    task_args = [
+        (str(mask_file), num_classes, fill_holes, min_hole_size, min_object_size,
+         closing_iterations, fill_interior_class, fill_interior_target,
+         union_hole_fill, remove_small_objects_enabled, union_gap_fill,
+         union_gap_closing_iterations, fill_blue_table_quadrant_enabled,
+         blue_table_label, blue_table_target, blue_table_quadrant_mode,
+         blue_table_y_pad_top, blue_table_y_pad_bottom,
+         blue_table_skip_if_label_above, blue_table_skip_if_label_area_gt,
+         overwrite, fill_bg_roi_list)
+        for mask_file in mask_files
+    ]
+
+    done_count = 0
+    skipped_count = 0
+
+    if num_workers <= 1:
+        # Serial fallback
+        for args_tuple in tqdm(task_args, desc=input_dir.name):
+            name, status = _process_single_file(args_tuple)
+            if status == "skipped":
+                skipped_count += 1
+            else:
+                done_count += 1
+    else:
+        # Parallel processing
+        with multiprocessing.Pool(processes=num_workers) as pool:
+            for name, status in tqdm(
+                pool.imap_unordered(_process_single_file, task_args),
+                total=len(task_args),
+                desc=input_dir.name,
+            ):
+                if status == "skipped":
+                    skipped_count += 1
+                else:
+                    done_count += 1
+
+    print(f"Done! {input_dir.name}: {done_count} processed, {skipped_count} skipped.")
 
 
 def _build_episode_to_chunk_map(dataset_root: Path) -> dict[str, str]:
@@ -337,6 +687,30 @@ def main():
                         help='Morphological closing iterations (default: 1)')
     parser.add_argument('--no_fill_holes', action='store_true',
                         help='Disable hole filling')
+    parser.add_argument('--no_remove_small_objects', action='store_true',
+                        help='Disable removing small objects')
+    parser.add_argument('--union_hole_fill', action='store_true',
+                        help='Fill holes based on union of all >0 classes')
+    parser.add_argument('--union_gap_fill', action='store_true',
+                        help='Fill thin background gaps between classes using union closing')
+    parser.add_argument('--union_gap_closing_iterations', type=int, default=1,
+                        help='Closing iterations for union gap fill (default: 1)')
+    parser.add_argument('--fill_blue_table_quadrant', action='store_true',
+                        help='Fill black region in blue table quadrant')
+    parser.add_argument('--blue_table_label', type=int, default=1,
+                        help='Label id for blue table (default: 1)')
+    parser.add_argument('--blue_table_target', type=int, default=4,
+                        help='Target label for blue table quadrant fill (default: 4)')
+    parser.add_argument('--blue_table_quadrant_mode', type=str, default="right_down",
+                        help='Quadrant fill mode: right_down or left_down')
+    parser.add_argument('--blue_table_y_pad_top', type=int, default=60,
+                        help='Top padding rows to exclude from quadrant fill')
+    parser.add_argument('--blue_table_y_pad_bottom', type=int, default=60,
+                        help='Bottom padding rows to exclude from quadrant fill')
+    parser.add_argument('--blue_table_skip_if_label_above', type=int, default=None,
+                        help='Skip quadrant fill if this label is higher than blue table')
+    parser.add_argument('--blue_table_skip_if_label_area_gt', type=int, default=None,
+                        help='Skip quadrant fill if skip label area exceeds this pixel count')
     parser.add_argument('--fill_interior_class', type=str, default=None,
                         help='Fill background inside these class contours. Comma-separated (e.g., "1,3" for red and blue). None to disable.')
     parser.add_argument('--fill_interior_target', type=int, default=4,
@@ -353,6 +727,11 @@ def main():
                         help='Explicit source dataset root for data/meta/videos')
     parser.add_argument('--dry_run', action='store_true',
                         help='Print copy summary without copying files')
+    parser.add_argument('--num_workers', type=int, default=8,
+                        help='Number of parallel workers for postprocessing (default: 8)')
+    parser.add_argument('--fill_bg_roi', type=str, action='append', default=None,
+                        help='Fill background in ROI. Format: "frame_start,frame_end_ratio,y_min,y_max,x_min,x_max,target". '
+                             'Use -1 for full range. Can be specified multiple times.')
     
     args = parser.parse_args()
     
@@ -362,6 +741,11 @@ def main():
     fill_interior_classes = None
     if args.fill_interior_class is not None:
         fill_interior_classes = [int(x.strip()) for x in args.fill_interior_class.split(',')]
+
+    # Parse fill_bg_roi specs
+    fill_bg_roi_list = None
+    if args.fill_bg_roi:
+        fill_bg_roi_list = [parse_fill_bg_roi(s) for s in args.fill_bg_roi]
     
     if not args.copy_only:
         print("="*50)
@@ -373,6 +757,19 @@ def main():
         print(f"  - min_hole_size: {args.min_hole_size}")
         print(f"  - min_object_size: {args.min_object_size}")
         print(f"  - closing_iterations: {args.closing_iterations}")
+        print(f"  - remove_small_objects: {not args.no_remove_small_objects}")
+        print(f"  - union_hole_fill: {args.union_hole_fill}")
+        print(f"  - union_gap_fill: {args.union_gap_fill}")
+        print(f"  - union_gap_closing_iterations: {args.union_gap_closing_iterations}")
+        print(f"  - fill_blue_table_quadrant: {args.fill_blue_table_quadrant}")
+        if args.fill_blue_table_quadrant:
+            print(f"  - blue_table_label: {args.blue_table_label}")
+            print(f"  - blue_table_target: {args.blue_table_target}")
+            print(f"  - blue_table_quadrant_mode: {args.blue_table_quadrant_mode}")
+            print(f"  - blue_table_y_pad_top: {args.blue_table_y_pad_top}")
+            print(f"  - blue_table_y_pad_bottom: {args.blue_table_y_pad_bottom}")
+            print(f"  - blue_table_skip_if_label_above: {args.blue_table_skip_if_label_above}")
+            print(f"  - blue_table_skip_if_label_area_gt: {args.blue_table_skip_if_label_area_gt}")
         if fill_interior_classes is not None:
             class_names = {1: 'red', 2: 'green', 3: 'blue'}
             class_str = ', '.join([f"{c}({class_names.get(c, '?')})" for c in fill_interior_classes])
@@ -398,7 +795,21 @@ def main():
                 closing_iterations=args.closing_iterations,
                 fill_interior_class=fill_interior_classes,
                 fill_interior_target=args.fill_interior_target,
+                union_hole_fill=args.union_hole_fill,
+                remove_small_objects_enabled=not args.no_remove_small_objects,
+                union_gap_fill=args.union_gap_fill,
+                union_gap_closing_iterations=args.union_gap_closing_iterations,
+                fill_blue_table_quadrant_enabled=args.fill_blue_table_quadrant,
+                blue_table_label=args.blue_table_label,
+                blue_table_target=args.blue_table_target,
+                blue_table_quadrant_mode=args.blue_table_quadrant_mode,
+                blue_table_y_pad_top=args.blue_table_y_pad_top,
+                blue_table_y_pad_bottom=args.blue_table_y_pad_bottom,
+                blue_table_skip_if_label_above=args.blue_table_skip_if_label_above,
+                blue_table_skip_if_label_area_gt=args.blue_table_skip_if_label_area_gt,
                 overwrite=args.overwrite,
+                num_workers=args.num_workers,
+                fill_bg_roi_list=fill_bg_roi_list,
             )
 
         print("\nAll done!")
