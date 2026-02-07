@@ -18,10 +18,11 @@ CAMERAS=(
 
 OUTPUT_DIR="/localhome/local-vennw/code/task7_01220206_merged/comparison_videos"
 
-NUM_SAMPLES=10
+NUM_SAMPLES=2
 N_PARALLEL=10
 SEED=42
-MIN_EPISODE=100  # Only select episodes with index > this value
+MIN_EPISODE=1  # Only select episodes with index > this value
+MAX_EPISODE=100  # Only select episodes with index < this value
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -29,7 +30,7 @@ echo "🎬 Producing comparison videos (original | raw mask | post mask)"
 echo "----------------------------------------------------------------"
 echo "Cameras: ${#CAMERAS[@]}"
 echo "Samples per camera: $NUM_SAMPLES"
-echo "Min episode index: > $MIN_EPISODE"
+echo "Episode range: ($MIN_EPISODE, $MAX_EPISODE)"
 echo "Seed: $SEED"
 echo "Output: $OUTPUT_DIR"
 echo "----------------------------------------------------------------"
@@ -55,7 +56,7 @@ produce_random_comparisons() {
     fi
     # Remove leading zeros for numeric comparison
     ep_num=$((10#$ep_num))
-    if [ "$ep_num" -le "$MIN_EPISODE" ]; then
+    if [ "$ep_num" -le "$MIN_EPISODE" ] || [ "$ep_num" -ge "$MAX_EPISODE" ]; then
       continue
     fi
     if [ -f "${mask_dir}/${ep}_masks.npz" ] && [ -f "${video_dir}/${ep}.mp4" ]; then
@@ -64,11 +65,11 @@ produce_random_comparisons() {
   done
 
   if [ ${#episodes[@]} -eq 0 ]; then
-    echo "No valid episodes (> ${MIN_EPISODE}) found for ${camera}, skipping."
+    echo "No valid episodes in (${MIN_EPISODE}, ${MAX_EPISODE}) found for ${camera}, skipping."
     return
   fi
 
-  echo "-> ${camera}: found ${#episodes[@]} episodes (> ${MIN_EPISODE}), sampling ${NUM_SAMPLES}"
+  echo "-> ${camera}: found ${#episodes[@]} episodes in (${MIN_EPISODE}, ${MAX_EPISODE}), sampling ${NUM_SAMPLES}"
 
   # Randomly sample using Python
   local selected
