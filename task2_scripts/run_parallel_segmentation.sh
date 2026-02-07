@@ -55,7 +55,7 @@ LEFT_ARM_CAMERA="observation.images.left_arm_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # Use 8 GPUs (0-7)
-GPU_IDS="1 2 3 4 5 6 7"
+GPU_IDS="4 5 6 7"
 
 echo "🚀 Starting Parallel Segmentation Job (task2 4 cams, 4 GPUs)"
 echo "--------------------------------------------------------------"

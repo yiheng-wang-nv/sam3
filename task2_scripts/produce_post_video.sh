@@ -8,8 +8,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 BASE_DIR="/localhome/local-vennw/code/task2_01210123012601280130_600merged/videos/chunk-000"
 SAM3_OUTPUT="/localhome/local-vennw/code/task2_01210123012601280130_600merged/sam3_output"
 
-LEFT_ARM_CAMERA="observation.images.left_arm_camera_color_optical_frame"
-RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
+HEAD_LEFT_CAMERA="observation.images.head_left_camera_color_optical_frame"
+HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
 
 OUTPUT_DIR="/localhome/local-vennw/code/task2_01210123012601280130_600merged/comparison_videos"
 
@@ -87,7 +87,7 @@ for e in selected:
   done
 }
 
-produce_random_comparisons "$LEFT_ARM_CAMERA" "$SEED"
-produce_random_comparisons "$RIGHT_ARM_CAMERA" "$((SEED + 1))"
+produce_random_comparisons "$HEAD_LEFT_CAMERA" "$SEED"
+produce_random_comparisons "$HEAD_RIGHT_CAMERA" "$((SEED + 1))"
 
 echo "✅ Done! Comparison videos saved as *_comparison.mp4"
