@@ -6,8 +6,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task3_01210122_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task3_01210122_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task3_012101220209_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task3_012101220209_merged/sam3_output"
 
 # Prompts (per camera)
 HEAD_LEFT_PROMPTS=("blue table" "robotic arm(s)" "silver box")
@@ -49,7 +49,7 @@ LEFT_ARM_CAMERA="observation.images.left_arm_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # Use 8 GPUs (0-7)
-GPU_IDS="0"
+GPU_IDS="0 1 2 3 4 5 6 7"
 
 echo "🚀 Starting Parallel Segmentation Job (task3 4 cams, 8 GPUs)"
 echo "--------------------------------------------------------------"
@@ -63,32 +63,6 @@ echo "Left Arm Prompts:   ${LEFT_ARM_PROMPTS[*]}"
 echo "Right Arm Prompts:  ${RIGHT_ARM_PROMPTS[*]}"
 echo "GPUs:      ${GPU_IDS}"
 echo "--------------------------------------------------------------"
-
-echo "-> Running head left camera"
-python "${SAM3_DIR}/batch_run_parallel.py" \
-  --base_dir "$BASE_DIR" \
-  --checkpoint "$CHECKPOINT" \
-  --output_dir "$BASE_OUTPUT_DIR" \
-  --cameras "$HEAD_LEFT_CAMERA" \
-  --prompts "${HEAD_LEFT_PROMPTS[@]}" \
-  --save_npz \
-  --no_pkl \
-  --save_side_by_side \
-  --postprocess \
-  --pp_min_hole_size "$PP_MIN_HOLE_SIZE" \
-  --pp_min_object_size "$PP_MIN_OBJECT_SIZE" \
-  --pp_closing_iterations "$PP_CLOSING_ITERATIONS" \
-  $( [ "$PP_NO_REMOVE_SMALL_OBJECTS" = true ] && echo "--pp_no_remove_small_objects" ) \
-  $( [ "$PP_UNION_HOLE_FILL" = true ] && echo "--pp_union_hole_fill" ) \
-  $( [ "$PP_UNION_GAP_FILL" = true ] && echo "--pp_union_gap_fill" ) \
-  $( [ "$PP_UNION_GAP_FILL" = true ] && echo "--pp_union_gap_closing_iterations" "$PP_UNION_GAP_CLOSING_ITERATIONS" ) \
-  --pp_fill_interior_class "$HEAD_LEFT_PP_FILL_CLASS" \
-  --pp_fill_interior_target "$HEAD_LEFT_PP_FILL_TARGET" \
-  --pp_fill_bg_roi "$HEAD_LEFT_FILL_BG_ROI" \
-  --pp_overwrite \
-  --skip_if_exists \
-  --pp_num_workers "$PP_NUM_WORKERS" \
-  --gpu_ids $GPU_IDS
 
 echo "-> Running head right camera"
 python "${SAM3_DIR}/batch_run_parallel.py" \
@@ -114,19 +88,6 @@ python "${SAM3_DIR}/batch_run_parallel.py" \
   --pp_overwrite \
   --skip_if_exists \
   --pp_num_workers "$PP_NUM_WORKERS" \
-  --gpu_ids $GPU_IDS
-
-echo "-> Running left arm camera"
-python "${SAM3_DIR}/batch_run_parallel.py" \
-  --base_dir "$BASE_DIR" \
-  --checkpoint "$CHECKPOINT" \
-  --output_dir "$BASE_OUTPUT_DIR" \
-  --cameras "$LEFT_ARM_CAMERA" \
-  --prompts "${LEFT_ARM_PROMPTS[@]}" \
-  --save_npz \
-  --no_pkl \
-  --save_side_by_side \
-  --skip_if_exists \
   --gpu_ids $GPU_IDS
 
 echo "-> Running right arm camera"
