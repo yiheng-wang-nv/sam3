@@ -1,9 +1,9 @@
 #!/bin/bash
 # Compare MD5 checksums of overlapping parquet files between two datasets
 # Usage: bash compare_parquet_md5.sh <old_dir> <new_dir>
-#   e.g. bash compare_parquet_md5.sh \
-#          /localhome/local-vennw/code/task7_20260122_trimmed/data/chunk-000 \
-#          /localhome/local-vennw/code/task7_01220206_merged/data/chunk-000
+# bash compare_parquet_md5.sh \
+#          /localhome/local-vennw/code/task4-2_020202050212_merged/data/chunk-000 \
+#          /localhome/local-vennw/code/task4-2_02020205_merged/data/chunk-000
 
 OLD_DIR="${1:?Usage: $0 <old_dir> <new_dir>}"
 NEW_DIR="${2:?Usage: $0 <old_dir> <new_dir>}"

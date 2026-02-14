@@ -56,7 +56,7 @@ def _colorize_mask(mask: np.ndarray) -> np.ndarray:
         1: (255, 0, 0),
         2: (0, 255, 0),
         3: (0, 0, 255),
-        4: (255, 255, 0),
+        4: (255, 255, 255),
     }
     h, w = mask.shape
     colored = np.zeros((h, w, 3), dtype=np.uint8)

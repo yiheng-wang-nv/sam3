@@ -256,6 +256,88 @@ def fill_blue_table_quadrant(
     return result
 
 
+def fill_table_top_line(mask, table_label=1, fill_label=6,
+                        tl_x_range=(100, 230), tl_y_range=(150, 200),
+                        tr_x_range=(300, 430), tr_y_range=(150, 200),
+                        bl_x_range=(50, 170), bl_y_range=(300, 370),
+                        br_x_range=(350, 450), br_y_range=(260, 350)):
+    """
+    Fill background inside the quadrilateral formed by four corner points
+    of table_label pixels, each searched within a constrained ROI to avoid
+    being misled by scattered noise pixels.
+
+    Corner search ROIs (x_min, x_max, y_min, y_max):
+      TL: top-left      -- min y, then min x within ROI
+      TR: top-right     -- min y, then max x within ROI
+      BL: bottom-left   -- max y, then min x within ROI
+      BR: bottom-right  -- max y, then max x within ROI
+
+    Args:
+        mask: Multi-class mask (H, W) with labels 0, 1, 2, ...
+        table_label: Label for the table class (default: 1)
+        fill_label: Value to fill background with (default: 6)
+        tl_x_range, tl_y_range: ROI for top-left corner search
+        tr_x_range, tr_y_range: ROI for top-right corner search
+        bl_x_range, bl_y_range: ROI for bottom-left corner search
+        br_x_range, br_y_range: ROI for bottom-right corner search
+
+    Returns:
+        Modified mask with filled background inside the table quadrilateral.
+    """
+    h, w = mask.shape
+
+    table_pixels = (mask == table_label)
+    if table_pixels.sum() == 0:
+        return mask
+
+    def _find_corner(mask2d, x_min, x_max, y_min, y_max, mode):
+        """Find a corner point within the given ROI.
+        mode: 'tl' (min y then min x), 'tr' (min y then max x),
+              'bl' (max y then min x), 'br' (max y then max x)
+        Returns (x, y) or None.
+        """
+        roi = mask2d[y_min:y_max+1, x_min:x_max+1]
+        coords_roi = np.argwhere(roi)  # [y_local, x_local]
+        if coords_roi.shape[0] == 0:
+            return None
+        ry, rx = coords_roi[:, 0], coords_roi[:, 1]
+        if mode in ('tl', 'tr'):
+            target_y = int(ry.min())
+            cand_x = rx[ry == target_y]
+            target_x = int(cand_x.min()) if mode == 'tl' else int(cand_x.max())
+        else:  # bl, br
+            target_y = int(ry.max())
+            cand_x = rx[ry == target_y]
+            target_x = int(cand_x.min()) if mode == 'bl' else int(cand_x.max())
+        return (x_min + target_x, y_min + target_y)
+
+    tl = _find_corner(table_pixels, tl_x_range[0], tl_x_range[1], tl_y_range[0], tl_y_range[1], 'tl')
+    tr = _find_corner(table_pixels, tr_x_range[0], tr_x_range[1], tr_y_range[0], tr_y_range[1], 'tr')
+    bl = _find_corner(table_pixels, bl_x_range[0], bl_x_range[1], bl_y_range[0], bl_y_range[1], 'bl')
+    br = _find_corner(table_pixels, br_x_range[0], br_x_range[1], br_y_range[0], br_y_range[1], 'br')
+
+    if any(p is None for p in (tl, tr, bl, br)):
+        return mask
+
+    # Quadrilateral: TL -> TR -> BR -> BL  (cv2 uses (x, y) order)
+    poly = np.array([
+        [tl[0], tl[1]],
+        [tr[0], tr[1]],
+        [br[0], br[1]],
+        [bl[0], bl[1]],
+    ], dtype=np.int32)
+
+    fill_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(fill_mask, [poly], 1)
+
+    # Only fill where original mask is background (0)
+    result = mask.copy()
+    to_fill = (fill_mask == 1) & (mask == 0)
+    result[to_fill] = fill_label
+
+    return result
+
+
 def parse_fill_bg_roi(spec_str):
     """
     Parse a fill_bg_roi spec string.
@@ -305,6 +387,17 @@ def postprocess_video_masks(masks,
                             blue_table_y_pad_bottom=60,
                             blue_table_skip_if_label_above=None,
                             blue_table_skip_if_label_area_gt=None,
+                            fill_table_top_line_enabled=False,
+                            table_top_label=1,
+                            table_top_fill_target=6,
+                            table_top_tl_x_range=(100, 230),
+                            table_top_tl_y_range=(150, 200),
+                            table_top_tr_x_range=(300, 430),
+                            table_top_tr_y_range=(150, 200),
+                            table_top_bl_x_range=(50, 170),
+                            table_top_bl_y_range=(300, 370),
+                            table_top_br_x_range=(350, 450),
+                            table_top_br_y_range=(260, 350),
                             fill_bg_roi_list=None):
     """
     Postprocess masks for all frames in a video.
@@ -406,6 +499,21 @@ def postprocess_video_masks(masks,
                 skip_if_label_area_gt=blue_table_skip_if_label_area_gt,
             )
 
+        if fill_table_top_line_enabled:
+            processed_frame = fill_table_top_line(
+                processed_frame,
+                table_label=table_top_label,
+                fill_label=table_top_fill_target,
+                tl_x_range=table_top_tl_x_range,
+                tl_y_range=table_top_tl_y_range,
+                tr_x_range=table_top_tr_x_range,
+                tr_y_range=table_top_tr_y_range,
+                bl_x_range=table_top_bl_x_range,
+                bl_y_range=table_top_bl_y_range,
+                br_x_range=table_top_br_x_range,
+                br_y_range=table_top_br_y_range,
+            )
+
         # Apply interior filling rule: background inside target_class -> fill_class
         if fill_interior_class is not None:
             processed_frame = fill_interior_with_class(
@@ -437,7 +545,9 @@ def _process_single_file(args_tuple):
      blue_table_label, blue_table_target, blue_table_quadrant_mode,
      blue_table_y_pad_top, blue_table_y_pad_bottom,
      blue_table_skip_if_label_above, blue_table_skip_if_label_area_gt,
-     overwrite, fill_bg_roi_list) = args_tuple
+     overwrite, fill_bg_roi_list,
+     fill_table_top_line_enabled, table_top_label, table_top_fill_target,
+     table_top_corner_ranges) = args_tuple
 
     mask_file = Path(mask_file)
     out_path = mask_file.parent / mask_file.name.replace("_masks.npz", "_masks_post.npz")
@@ -449,8 +559,9 @@ def _process_single_file(args_tuple):
     data = np.load(mask_file)
     masks = data['arr_0']  # (T, H, W)
 
-    # Detect number of classes
-    detected_classes = len(np.unique(masks))
+    # Detect number of classes (use max label + 1, not count of unique values,
+    # to handle non-contiguous labels like [0,1,2,3,5] where label 4 is absent)
+    detected_classes = int(masks.max()) + 1 if masks.size > 0 else 1
     use_num_classes = max(num_classes, detected_classes)
 
     # Process
@@ -475,6 +586,10 @@ def _process_single_file(args_tuple):
         blue_table_y_pad_bottom=blue_table_y_pad_bottom,
         blue_table_skip_if_label_above=blue_table_skip_if_label_above,
         blue_table_skip_if_label_area_gt=blue_table_skip_if_label_area_gt,
+        fill_table_top_line_enabled=fill_table_top_line_enabled,
+        table_top_label=table_top_label,
+        table_top_fill_target=table_top_fill_target,
+        **table_top_corner_ranges,
         fill_bg_roi_list=fill_bg_roi_list,
     )
 
@@ -505,7 +620,11 @@ def process_directory(input_dir: Path,
                       blue_table_skip_if_label_area_gt=None,
                       overwrite=False,
                       num_workers=1,
-                      fill_bg_roi_list=None):
+                      fill_bg_roi_list=None,
+                      fill_table_top_line_enabled=False,
+                      table_top_label=1,
+                      table_top_fill_target=6,
+                      table_top_corner_ranges=None):
     """
     Process all *_masks.npz files in a directory.
     Output: *_masks_post.npz
@@ -514,7 +633,10 @@ def process_directory(input_dir: Path,
         num_workers: Number of parallel workers. 1 = serial (default).
                      Set to > 1 for multiprocessing parallelism.
         fill_bg_roi_list: List of ROI fill specs (see parse_fill_bg_roi).
+        table_top_corner_ranges: dict of ROI ranges for fill_table_top_line corners.
     """
+    if table_top_corner_ranges is None:
+        table_top_corner_ranges = {}
     import multiprocessing
 
     mask_files = sorted(input_dir.glob("*_masks.npz"))
@@ -534,7 +656,9 @@ def process_directory(input_dir: Path,
          blue_table_label, blue_table_target, blue_table_quadrant_mode,
          blue_table_y_pad_top, blue_table_y_pad_bottom,
          blue_table_skip_if_label_above, blue_table_skip_if_label_area_gt,
-         overwrite, fill_bg_roi_list)
+         overwrite, fill_bg_roi_list,
+         fill_table_top_line_enabled, table_top_label, table_top_fill_target,
+         table_top_corner_ranges)
         for mask_file in mask_files
     ]
 
@@ -715,6 +839,12 @@ def main():
                         help='Fill background inside these class contours. Comma-separated (e.g., "1,3" for red and blue). None to disable.')
     parser.add_argument('--fill_interior_target', type=int, default=4,
                         help='New class label for filled interior (default: 4)')
+    parser.add_argument('--fill_table_top_line', action='store_true',
+                        help='Fill background inside the closed region formed by the largest CC of table label and a line connecting its top-left and top-right corners.')
+    parser.add_argument('--table_top_label', type=int, default=1,
+                        help='Label for the table class used by fill_table_top_line (default: 1)')
+    parser.add_argument('--table_top_fill_target', type=int, default=6,
+                        help='Fill target for fill_table_top_line (default: 6)')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing *_masks_post.npz files')
     parser.add_argument('--copy_to_dataset_root', type=str, default=None,
@@ -774,6 +904,10 @@ def main():
             class_names = {1: 'red', 2: 'green', 3: 'blue'}
             class_str = ', '.join([f"{c}({class_names.get(c, '?')})" for c in fill_interior_classes])
             print(f"  - fill_interior: classes [{class_str}] interior -> {args.fill_interior_target}")
+        print(f"  - fill_table_top_line: {args.fill_table_top_line}")
+        if args.fill_table_top_line:
+            print(f"  - table_top_label: {args.table_top_label}")
+            print(f"  - table_top_fill_target: {args.table_top_fill_target}")
         print("="*50)
 
         # Find all camera subdirectories
@@ -810,6 +944,9 @@ def main():
                 overwrite=args.overwrite,
                 num_workers=args.num_workers,
                 fill_bg_roi_list=fill_bg_roi_list,
+                fill_table_top_line_enabled=args.fill_table_top_line,
+                table_top_label=args.table_top_label,
+                table_top_fill_target=args.table_top_fill_target,
             )
 
         print("\nAll done!")

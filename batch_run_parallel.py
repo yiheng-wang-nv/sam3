@@ -259,6 +259,12 @@ if __name__ == "__main__":
     parser.add_argument("--pp_blue_table_skip_if_label_area_gt", type=int, default=None, help="Postprocess: skip fill if label area exceeds this size.")
     parser.add_argument("--pp_fill_interior_class", type=str, default=None, help='Postprocess: fill background inside these class contours, e.g. "1,3".')
     parser.add_argument("--pp_fill_interior_target", type=int, default=4, help="Postprocess: target class for interior fill.")
+    parser.add_argument("--pp_fill_table_top_line", action="store_true", help="Postprocess: fill background inside table top-line closed region.")
+    parser.add_argument("--pp_table_top_label", type=int, default=1, help="Postprocess: table label for fill_table_top_line (default: 1).")
+    parser.add_argument("--pp_table_top_fill_target", type=int, default=6, help="Postprocess: fill target for fill_table_top_line (default: 6).")
+    parser.add_argument("--pp_table_top_corner_ranges", type=str, default=None,
+                        help='Corner ROI ranges for fill_table_top_line. Format: '
+                             '"tl_x0,tl_x1,tl_y0,tl_y1;tr_x0,tr_x1,tr_y0,tr_y1;bl_x0,bl_x1,bl_y0,bl_y1;br_x0,br_x1,br_y0,br_y1"')
     parser.add_argument("--pp_overwrite", action="store_true", help="Postprocess: overwrite existing *_masks_post.npz.")
     parser.add_argument(
         "--pp_per_camera",
@@ -402,6 +408,20 @@ if __name__ == "__main__":
                 per_camera = _parse_pp_per_camera(args.pp_per_camera)
                 default_classes = _parse_class_list(args.pp_fill_interior_class)
                 default_target = args.pp_fill_interior_target
+                # Parse table top corner ranges
+                table_top_corner_ranges = {}
+                if args.pp_table_top_corner_ranges:
+                    parts = args.pp_table_top_corner_ranges.split(";")
+                    names = [
+                        ("table_top_tl_x_range", "table_top_tl_y_range"),
+                        ("table_top_tr_x_range", "table_top_tr_y_range"),
+                        ("table_top_bl_x_range", "table_top_bl_y_range"),
+                        ("table_top_br_x_range", "table_top_br_y_range"),
+                    ]
+                    for part, (xname, yname) in zip(parts, names):
+                        vals = [int(v) for v in part.split(",")]
+                        table_top_corner_ranges[xname] = (vals[0], vals[1])
+                        table_top_corner_ranges[yname] = (vals[2], vals[3])
                 fill_bg_roi_list = None
                 if args.pp_fill_bg_roi:
                     fill_bg_roi_list = [parse_fill_bg_roi(s) for s in args.pp_fill_bg_roi]
@@ -448,6 +468,10 @@ if __name__ == "__main__":
                         overwrite=args.pp_overwrite,
                         num_workers=args.pp_num_workers,
                         fill_bg_roi_list=fill_bg_roi_list,
+                        fill_table_top_line_enabled=args.pp_fill_table_top_line,
+                        table_top_label=args.pp_table_top_label,
+                        table_top_fill_target=args.pp_table_top_fill_target,
+                        table_top_corner_ranges=table_top_corner_ranges,
                     )
 
     print("All segmentation tasks completed.")

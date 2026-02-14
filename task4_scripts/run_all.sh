@@ -1,0 +1,2 @@
+bash run_parallel_segmentation.sh
+bash run_parallel_segmentation_p2.sh
