@@ -6,21 +6,21 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task4-1_02020205_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task4-1_02020205_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/sam3_output"
 
 # Prompts (same for all cameras)
-PROMPTS=("blue table" "robotic arm(s)" "tools" "trash can" "silver box")
+PROMPTS=("blue table" "robotic arm(s)" "tools" "trash can")
 
 # Camera names
 HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # GPU Selection
-GPU_IDS="0 1 2"
+GPU_IDS="0 1 2 3 4 5 6 7"
 
 # Postprocess settings (shared)
-PP_NUM_WORKERS=32
+PP_NUM_WORKERS=96
 PP_MIN_HOLE_SIZE=64
 PP_MIN_OBJECT_SIZE=50
 PP_CLOSING_ITERATIONS=1
@@ -30,8 +30,8 @@ PP_UNION_GAP_FILL=true
 PP_UNION_GAP_CLOSING_ITERATIONS=1
 
 # Interior fill (all cameras)
-PP_FILL_CLASS="1,2,3,4,5"
-PP_FILL_TARGET=6
+PP_FILL_CLASS="1,2,3,4"
+PP_FILL_TARGET=5
 
 CAMERAS=(
     "$HEAD_RIGHT_CAMERA"
