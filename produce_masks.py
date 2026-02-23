@@ -305,6 +305,23 @@ def parse_args():
         help="Postprocess: target class for interior fill."
     )
     parser.add_argument(
+        "--pp_scanline_fill",
+        action="store_true",
+        help="Postprocess: row-based fill between first/last source_label pixels.",
+    )
+    parser.add_argument(
+        "--pp_scanline_source_label",
+        type=int,
+        default=1,
+        help="Postprocess: label to scan for in scanline fill (default: 1).",
+    )
+    parser.add_argument(
+        "--pp_scanline_fill_value",
+        type=int,
+        default=3,
+        help="Postprocess: value to fill background with in scanline fill (default: 3).",
+    )
+    parser.add_argument(
         "--save_video", 
         action="store_true",
         help="Whether to save the visualization video"
@@ -370,6 +387,13 @@ def parse_args():
         action="store_true",
         help="Invert masks: all predicted labels -> 0, background -> 1.",
     )
+    parser.add_argument(
+        "--static_prompts",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Prompts whose mask is static (segment frame 0 only, replicate to all frames).",
+    )
     return parser.parse_args()
 
 def propagate_in_video(predictor, session_id, max_frames=None):
@@ -406,8 +430,13 @@ def main():
     # If not saving video, we can skip loading all frames to memory to save RAM,
     # unless SAM3 requires them for initialization (it does need 'resource_path' to be valid).
     
+    total_video_frames = 0
+
     if isinstance(video_path, str) and video_path.endswith(".mp4"):
         cap = cv2.VideoCapture(video_path)
+        total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if args.max_frames is not None:
+            total_video_frames = min(total_video_frames, args.max_frames)
         video_frames_for_vis = []
         if args.save_video or args.save_side_by_side:
             while True:
@@ -432,7 +461,11 @@ def main():
         except ValueError:
             print(f"Falling back to lexicographic sort for frames.")
             video_frames_for_vis.sort()
-        
+
+        total_video_frames = len(video_frames_for_vis)
+        if args.max_frames is not None:
+            total_video_frames = min(total_video_frames, args.max_frames)
+
         if not (args.save_video or args.save_side_by_side) and video_frames_for_vis:
              # Just keep one for dimension check if needed
              # Actually glob just returns paths, so memory is fine.
@@ -464,11 +497,17 @@ def main():
 
     prompts_list = args.prompts
     merged_outputs = {}
-    
+    static_prompts_set = set(args.static_prompts) if args.static_prompts else set()
+    static_prompt_frame0 = {}
+    static_prompt_merged_frames = {}
+
     print(f"Start processing {len(prompts_list)} prompts: {prompts_list}")
+    if static_prompts_set:
+        print(f"Static prompts (frame-0 only, replicate to all frames): {static_prompts_set}")
 
     for prompt_idx, p in enumerate(prompts_list):
-        print(f"Processing prompt [{prompt_idx}]: '{p}'")
+        is_static = p in static_prompts_set
+        print(f"Processing prompt [{prompt_idx}]: '{p}'" + (" [STATIC]" if is_static else ""))
         
         # Reset session for new prompt
         _ = video_predictor.handle_request(
@@ -485,12 +524,21 @@ def main():
             )
         )
 
-        # Propagate
-        outputs_per_frame = propagate_in_video(
-            video_predictor, session_id, max_frames=args.max_frames
-        )
+        # Propagate (static prompts only need frame 0)
+        if is_static:
+            outputs_per_frame = propagate_in_video(
+                video_predictor, session_id, max_frames=1
+            )
+            if outputs_per_frame:
+                ref_key = min(outputs_per_frame.keys())
+                static_prompt_frame0[prompt_idx] = outputs_per_frame[ref_key]
+                static_prompt_merged_frames[prompt_idx] = set(outputs_per_frame.keys())
+        else:
+            outputs_per_frame = propagate_in_video(
+                video_predictor, session_id, max_frames=args.max_frames
+            )
         
-        # Merge this prompt's results
+        # Merge this prompt's results (for static prompts, only the propagated frames)
         for frame_idx, frame_data in outputs_per_frame.items():
             if frame_idx not in merged_outputs:
                 merged_outputs[frame_idx] = {
@@ -638,6 +686,37 @@ def main():
                     frame_data["out_binary_masks"]
                 )
 
+    # Replicate static prompt masks to all frames
+    if static_prompt_frame0:
+        all_frame_indices = sorted(merged_outputs.keys())
+        if not all_frame_indices and total_video_frames > 0:
+            all_frame_indices = list(range(total_video_frames))
+        for s_prompt_idx, frame0_data in static_prompt_frame0.items():
+            num_objs = len(frame0_data['out_obj_ids'])
+            if num_objs == 0:
+                continue
+            already_merged = static_prompt_merged_frames.get(s_prompt_idx, set())
+            frames_to_add = [f for f in all_frame_indices if f not in already_merged]
+            print(f"Replicating static prompt [{s_prompt_idx}] ('{prompts_list[s_prompt_idx]}') "
+                  f"to {len(frames_to_add)} additional frames")
+            for frame_idx in frames_to_add:
+                if frame_idx not in merged_outputs:
+                    merged_outputs[frame_idx] = {
+                        'out_obj_ids': [], 'out_probs': [],
+                        'out_boxes_xywh': [], 'out_binary_masks': []
+                    }
+                local_ids = np.full(num_objs, s_prompt_idx, dtype=np.int64)
+                merged_outputs[frame_idx]['out_obj_ids'].append(local_ids)
+                merged_outputs[frame_idx]['out_probs'].append(
+                    np.array(frame0_data['out_probs'], dtype=np.float32).reshape(-1)
+                )
+                merged_outputs[frame_idx]['out_boxes_xywh'].append(
+                    frame0_data['out_boxes_xywh']
+                )
+                merged_outputs[frame_idx]['out_binary_masks'].append(
+                    frame0_data['out_binary_masks']
+                )
+
     # Format merged outputs
     final_formatted_outputs = {}
 
@@ -728,6 +807,9 @@ def main():
             blue_table_y_pad_bottom=args.pp_blue_table_y_pad_bottom,
             blue_table_skip_if_label_above=args.pp_blue_table_skip_if_label_above,
             blue_table_skip_if_label_area_gt=args.pp_blue_table_skip_if_label_area_gt,
+            scanline_fill_enabled=args.pp_scanline_fill,
+            scanline_source_label=args.pp_scanline_source_label,
+            scanline_fill_value=args.pp_scanline_fill_value,
         )
         vis_outputs = label_masks_to_outputs(processed, frame_indices)
 

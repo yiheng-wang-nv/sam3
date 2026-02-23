@@ -338,6 +338,23 @@ def fill_table_top_line(mask, table_label=1, fill_label=6,
     return result
 
 
+def fill_scanline_between(mask, source_label=1, fill_value=3):
+    """
+    Row-based scanline fill: for each row, fill background (0) pixels between
+    the first and last occurrence of source_label with fill_value.
+    """
+    result = mask.copy()
+    H, W = mask.shape
+    for y in range(H):
+        cols = np.where(mask[y] == source_label)[0]
+        if cols.size == 0:
+            continue
+        start, end = cols[0], cols[-1]
+        bg = result[y, start:end + 1] == 0
+        result[y, start:end + 1][bg] = fill_value
+    return result
+
+
 def parse_fill_bg_roi(spec_str):
     """
     Parse a fill_bg_roi spec string.
@@ -398,7 +415,10 @@ def postprocess_video_masks(masks,
                             table_top_bl_y_range=(300, 370),
                             table_top_br_x_range=(350, 450),
                             table_top_br_y_range=(260, 350),
-                            fill_bg_roi_list=None):
+                            fill_bg_roi_list=None,
+                            scanline_fill_enabled=False,
+                            scanline_source_label=1,
+                            scanline_fill_value=3):
     """
     Postprocess masks for all frames in a video.
     
@@ -414,6 +434,9 @@ def postprocess_video_masks(masks,
             (frame_start, frame_end_ratio, y_min, y_max, x_min, x_max, target)
             Fill all background (0) pixels within the ROI with target value
             for the specified frame range.
+        scanline_fill_enabled: Row-based fill between first/last source_label pixels.
+        scanline_source_label: Label to scan for (default: 1).
+        scanline_fill_value: Value to fill background with (default: 3).
     
     Returns:
         Processed masks (T, H, W)
@@ -514,6 +537,13 @@ def postprocess_video_masks(masks,
                 br_y_range=table_top_br_y_range,
             )
 
+        if scanline_fill_enabled:
+            processed_frame = fill_scanline_between(
+                processed_frame,
+                source_label=scanline_source_label,
+                fill_value=scanline_fill_value,
+            )
+
         # Apply interior filling rule: background inside target_class -> fill_class
         if fill_interior_class is not None:
             processed_frame = fill_interior_with_class(
@@ -547,7 +577,8 @@ def _process_single_file(args_tuple):
      blue_table_skip_if_label_above, blue_table_skip_if_label_area_gt,
      overwrite, fill_bg_roi_list,
      fill_table_top_line_enabled, table_top_label, table_top_fill_target,
-     table_top_corner_ranges) = args_tuple
+     table_top_corner_ranges,
+     scanline_fill_enabled, scanline_source_label, scanline_fill_value) = args_tuple
 
     mask_file = Path(mask_file)
     out_path = mask_file.parent / mask_file.name.replace("_masks.npz", "_masks_post.npz")
@@ -591,6 +622,9 @@ def _process_single_file(args_tuple):
         table_top_fill_target=table_top_fill_target,
         **table_top_corner_ranges,
         fill_bg_roi_list=fill_bg_roi_list,
+        scanline_fill_enabled=scanline_fill_enabled,
+        scanline_source_label=scanline_source_label,
+        scanline_fill_value=scanline_fill_value,
     )
 
     # Save
@@ -624,7 +658,10 @@ def process_directory(input_dir: Path,
                       fill_table_top_line_enabled=False,
                       table_top_label=1,
                       table_top_fill_target=6,
-                      table_top_corner_ranges=None):
+                      table_top_corner_ranges=None,
+                      scanline_fill_enabled=False,
+                      scanline_source_label=1,
+                      scanline_fill_value=3):
     """
     Process all *_masks.npz files in a directory.
     Output: *_masks_post.npz
@@ -658,7 +695,8 @@ def process_directory(input_dir: Path,
          blue_table_skip_if_label_above, blue_table_skip_if_label_area_gt,
          overwrite, fill_bg_roi_list,
          fill_table_top_line_enabled, table_top_label, table_top_fill_target,
-         table_top_corner_ranges)
+         table_top_corner_ranges,
+         scanline_fill_enabled, scanline_source_label, scanline_fill_value)
         for mask_file in mask_files
     ]
 
@@ -845,6 +883,12 @@ def main():
                         help='Label for the table class used by fill_table_top_line (default: 1)')
     parser.add_argument('--table_top_fill_target', type=int, default=6,
                         help='Fill target for fill_table_top_line (default: 6)')
+    parser.add_argument('--scanline_fill', action='store_true',
+                        help='Row-based fill: fill background between first/last source_label pixels per row.')
+    parser.add_argument('--scanline_source_label', type=int, default=1,
+                        help='Label to scan for in scanline fill (default: 1).')
+    parser.add_argument('--scanline_fill_value', type=int, default=3,
+                        help='Value to fill background with in scanline fill (default: 3).')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing *_masks_post.npz files')
     parser.add_argument('--copy_to_dataset_root', type=str, default=None,
@@ -947,6 +991,9 @@ def main():
                 fill_table_top_line_enabled=args.fill_table_top_line,
                 table_top_label=args.table_top_label,
                 table_top_fill_target=args.table_top_fill_target,
+                scanline_fill_enabled=args.scanline_fill,
+                scanline_source_label=args.scanline_source_label,
+                scanline_fill_value=args.scanline_fill_value,
             )
 
         print("\nAll done!")

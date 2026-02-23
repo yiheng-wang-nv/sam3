@@ -99,6 +99,7 @@ def run_worker(
     pp_fill_interior_target=4,
     pp_per_camera=None,
     skip_if_exists=False,
+    static_prompts=None,
 ):
     """Worker function for GPU-based segmentation inference (PKL only, no video)"""
     
@@ -168,6 +169,8 @@ def run_worker(
             cmd += ["--no_pkl"]
         if invert_mask:
             cmd += ["--invert_mask"]
+        if static_prompts:
+            cmd += ["--static_prompts"] + list(static_prompts)
         if postprocess_for_vis:
             cam_classes = pp_fill_interior_class
             cam_target = pp_fill_interior_target
@@ -265,6 +268,9 @@ if __name__ == "__main__":
     parser.add_argument("--pp_table_top_corner_ranges", type=str, default=None,
                         help='Corner ROI ranges for fill_table_top_line. Format: '
                              '"tl_x0,tl_x1,tl_y0,tl_y1;tr_x0,tr_x1,tr_y0,tr_y1;bl_x0,bl_x1,bl_y0,bl_y1;br_x0,br_x1,br_y0,br_y1"')
+    parser.add_argument("--pp_scanline_fill", action="store_true", help="Postprocess: row-based fill between first/last source_label pixels.")
+    parser.add_argument("--pp_scanline_source_label", type=int, default=1, help="Postprocess: label to scan for in scanline fill (default: 1).")
+    parser.add_argument("--pp_scanline_fill_value", type=int, default=3, help="Postprocess: value to fill background with in scanline fill (default: 3).")
     parser.add_argument("--pp_overwrite", action="store_true", help="Postprocess: overwrite existing *_masks_post.npz.")
     parser.add_argument(
         "--pp_per_camera",
@@ -281,6 +287,12 @@ if __name__ == "__main__":
         "--skip_if_exists",
         action="store_true",
         help="Skip processing if output mask file already exists.",
+    )
+    parser.add_argument(
+        "--static_prompts",
+        nargs="*",
+        default=None,
+        help="Prompts whose mask is static (segment frame 0 only, replicate to all frames).",
     )
     parser.add_argument(
         "--pp_num_workers",
@@ -385,6 +397,7 @@ if __name__ == "__main__":
                     args.pp_fill_interior_target,
                     per_camera,
                     args.skip_if_exists,
+                    args.static_prompts,
                 )
             )
             processes.append(p)
@@ -472,6 +485,9 @@ if __name__ == "__main__":
                         table_top_label=args.pp_table_top_label,
                         table_top_fill_target=args.pp_table_top_fill_target,
                         table_top_corner_ranges=table_top_corner_ranges,
+                        scanline_fill_enabled=args.pp_scanline_fill,
+                        scanline_source_label=args.pp_scanline_source_label,
+                        scanline_fill_value=args.pp_scanline_fill_value,
                     )
 
     print("All segmentation tasks completed.")
