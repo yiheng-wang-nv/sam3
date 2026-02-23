@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# Get the directory where this script is located
+# Randomly sample N videos per camera, run inference + postprocess, and generate
+# side-by-side comparison videos to visually inspect the results.
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
@@ -17,7 +19,9 @@ RIGHT_ARM_PROMPTS=("blue table" "robotic arm(s)" "silver box" "tools")
 HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
-# GPU Selection
+# Sampling
+SAMPLE_N=2
+SAMPLE_SEED=42
 GPU_IDS="0 1 2 3 4 5 6 7"
 
 # Postprocess settings (shared)
@@ -36,7 +40,7 @@ HEAD_RIGHT_FILL_TARGET=3
 RIGHT_ARM_FILL_CLASS="1,2,3,4"
 RIGHT_ARM_FILL_TARGET=5
 
-# Scanline fill: fill background between first/last table pixels per row (head right only)
+# Scanline fill (head right only)
 PP_SCANLINE_FILL=true
 PP_SCANLINE_SOURCE_LABEL=1
 PP_SCANLINE_FILL_VALUE=3
@@ -57,14 +61,14 @@ RIGHT_ARM_TOPRIGHT_RECT_Y_MAX=420
 RIGHT_ARM_TOPRIGHT_RECT_Y_THRESHOLD=200
 RIGHT_ARM_TOPRIGHT_RECT_FRAME_START_RATIO=0.667
 
-echo "🚀 Starting Parallel Segmentation Job (task5)"
+echo "🔍 Sample Segmentation Test (task5) - ${SAMPLE_N} random videos per camera"
 echo "--------------------------------------------------------------------"
 echo "SAM3 Dir:  $SAM3_DIR"
 echo "Base Dir:  $BASE_DIR"
 echo "Output:    $BASE_OUTPUT_DIR"
 echo "GPUs:      ${GPU_IDS}"
-echo "Scanline fill: head right only ($PP_SCANLINE_SOURCE_LABEL->$PP_SCANLINE_FILL_VALUE)"
-echo "Postprocess: union_hole_fill, union_gap_fill(iter=$PP_UNION_GAP_CLOSING_ITERATIONS)"
+echo "  head_right prompts: ${HEAD_RIGHT_PROMPTS[*]}"
+echo "  right_arm  prompts: ${RIGHT_ARM_PROMPTS[*]}"
 echo "  head_right fill_interior: $HEAD_RIGHT_FILL_CLASS->$HEAD_RIGHT_FILL_TARGET"
 echo "  right_arm  fill_interior: $RIGHT_ARM_FILL_CLASS->$RIGHT_ARM_FILL_TARGET"
 echo "--------------------------------------------------------------------"
@@ -72,8 +76,12 @@ echo "--------------------------------------------------------------------"
 PP_COMMON_ARGS=(
   --save_npz
   --no_pkl
-  --skip_if_exists
+  --save_side_by_side
+  --postprocess_for_vis
   --postprocess
+  --skip_if_exists
+  --debug_n "$SAMPLE_N"
+  --debug_seed "$SAMPLE_SEED"
   --pp_num_workers "$PP_NUM_WORKERS"
   --pp_min_hole_size "$PP_MIN_HOLE_SIZE"
   --pp_min_object_size "$PP_MIN_OBJECT_SIZE"
@@ -86,7 +94,7 @@ PP_COMMON_ARGS=(
   --gpu_ids $GPU_IDS
 )
 
-echo "-> Running head right camera (with scanline fill)"
+echo "-> Running head right camera (${SAMPLE_N} samples, with scanline fill)"
 python "${SAM3_DIR}/batch_run_parallel.py" \
   --base_dir "$BASE_DIR" \
   --checkpoint "$CHECKPOINT" \
@@ -100,7 +108,7 @@ python "${SAM3_DIR}/batch_run_parallel.py" \
   --pp_fill_interior_target "$HEAD_RIGHT_FILL_TARGET" \
   "${PP_COMMON_ARGS[@]}"
 
-echo "-> Running right arm camera"
+echo "-> Running right arm camera (${SAMPLE_N} samples)"
 python "${SAM3_DIR}/batch_run_parallel.py" \
   --base_dir "$BASE_DIR" \
   --checkpoint "$CHECKPOINT" \
@@ -123,4 +131,5 @@ python "${SAM3_DIR}/batch_run_parallel.py" \
   $( [ "$RIGHT_ARM_TOPRIGHT_RECT" = true ] && echo "--pp_topright_rect_frame_start_ratio $RIGHT_ARM_TOPRIGHT_RECT_FRAME_START_RATIO" ) \
   "${PP_COMMON_ARGS[@]}"
 
-echo "🎉 Batch segmentation job finished!"
+echo "🎉 Sample segmentation test finished!"
+echo "Compare videos saved to: $BASE_OUTPUT_DIR/*/episode_*_compare.mp4"

@@ -384,6 +384,69 @@ def parse_fill_bg_roi(spec_str):
     return (frame_start, frame_end_ratio, y_min, y_max, x_min, x_max, target)
 
 
+def fill_bg_topleft_rect(mask, source_label, fill_value, y_max):
+    """
+    Find the top-left corner of source_label (min y, then min x),
+    fill all background (0) in the rectangle (0, y_corner) to (x_corner, y_max) with fill_value.
+    """
+    coords = np.argwhere(mask == source_label)
+    if coords.size == 0:
+        return mask
+    ys = coords[:, 0]
+    xs = coords[:, 1]
+    min_y = int(ys.min())
+    min_x = int(xs[ys == min_y].min())
+    h = mask.shape[0]
+    y_end = min(y_max + 1, h)
+    if min_y >= y_end or min_x <= 0:
+        return mask
+    result = mask.copy()
+    roi = result[min_y:y_end, 0:min_x]
+    roi[roi == 0] = fill_value
+    return result
+
+
+def fill_bg_topright_rect(mask, source_label, fill_value, y_max, y_threshold=200):
+    """
+    For all source_label pixels with y < y_threshold, fill the union of
+    their left-below rectangles: for each such pixel (x_i, y_i), the rect
+    [0:x_i, y_i:y_max] has bg filled with fill_value.
+
+    Efficiently computed via cumulative max x scanning top-to-bottom.
+    """
+    coords = np.argwhere(mask == source_label)
+    if coords.size == 0:
+        return mask
+    ys = coords[:, 0]
+    xs = coords[:, 1]
+    valid = ys < y_threshold
+    if not np.any(valid):
+        return mask
+    ys_v = ys[valid]
+    xs_v = xs[valid]
+
+    min_y = int(ys_v.min())
+    h = mask.shape[0]
+    y_end = min(y_max + 1, h)
+    if min_y >= y_end:
+        return mask
+
+    max_x_by_row = {}
+    for y_val, x_val in zip(ys_v.tolist(), xs_v.tolist()):
+        if y_val not in max_x_by_row or x_val > max_x_by_row[y_val]:
+            max_x_by_row[y_val] = x_val
+
+    result = mask.copy()
+    cum_max_x = 0
+    for row in range(min_y, y_end):
+        if row in max_x_by_row:
+            cum_max_x = max(cum_max_x, max_x_by_row[row])
+        if cum_max_x > 0:
+            roi = result[row, 0:cum_max_x]
+            roi[roi == 0] = fill_value
+    return result
+
+
 def postprocess_video_masks(masks, 
                             num_classes=4,
                             fill_holes=True,
@@ -418,7 +481,19 @@ def postprocess_video_masks(masks,
                             fill_bg_roi_list=None,
                             scanline_fill_enabled=False,
                             scanline_source_label=1,
-                            scanline_fill_value=3):
+                            scanline_fill_value=3,
+                            topleft_rect_enabled=False,
+                            topleft_rect_label=1,
+                            topleft_rect_fill=5,
+                            topleft_rect_y_max=420,
+                            topleft_rect_frame_start=10,
+                            topleft_rect_frame_end_ratio=0.667,
+                            topright_rect_enabled=False,
+                            topright_rect_label=1,
+                            topright_rect_fill=5,
+                            topright_rect_y_max=420,
+                            topright_rect_y_threshold=200,
+                            topright_rect_frame_start_ratio=0.667):
     """
     Postprocess masks for all frames in a video.
     
@@ -444,6 +519,14 @@ def postprocess_video_masks(masks,
     T, H, W = masks.shape
     result = np.zeros_like(masks)
     
+    # Precompute topleft_rect frame range
+    _tl_frame_start = topleft_rect_frame_start if topleft_rect_enabled else T
+    _tl_frame_end = int(T * topleft_rect_frame_end_ratio) if topleft_rect_enabled else 0
+
+    # Precompute topright_rect frame range
+    _tr_frame_start = int(T * topright_rect_frame_start_ratio) if topright_rect_enabled else T
+    _tr_frame_end = T if topright_rect_enabled else 0
+
     # Precompute ROI frame ranges
     _roi_ranges = []
     if fill_bg_roi_list:
@@ -557,7 +640,20 @@ def postprocess_video_masks(masks,
             if fs <= t < fe:
                 roi = processed_frame[ry0:ry1, rx0:rx1]
                 roi[roi == 0] = tgt
-        
+
+        # Fill bg in rect left-below the top-left corner of a label
+        if topleft_rect_enabled and _tl_frame_start <= t < _tl_frame_end:
+            processed_frame = fill_bg_topleft_rect(
+                processed_frame, topleft_rect_label, topleft_rect_fill, topleft_rect_y_max
+            )
+
+        # Fill bg in rect left-below the top-right corner of a label
+        if topright_rect_enabled and _tr_frame_start <= t < _tr_frame_end:
+            processed_frame = fill_bg_topright_rect(
+                processed_frame, topright_rect_label, topright_rect_fill,
+                topright_rect_y_max, topright_rect_y_threshold
+            )
+
         result[t] = processed_frame
     
     return result
@@ -578,7 +674,11 @@ def _process_single_file(args_tuple):
      overwrite, fill_bg_roi_list,
      fill_table_top_line_enabled, table_top_label, table_top_fill_target,
      table_top_corner_ranges,
-     scanline_fill_enabled, scanline_source_label, scanline_fill_value) = args_tuple
+     scanline_fill_enabled, scanline_source_label, scanline_fill_value,
+     topleft_rect_enabled, topleft_rect_label, topleft_rect_fill,
+     topleft_rect_y_max, topleft_rect_frame_start, topleft_rect_frame_end_ratio,
+     topright_rect_enabled, topright_rect_label, topright_rect_fill,
+     topright_rect_y_max, topright_rect_y_threshold, topright_rect_frame_start_ratio) = args_tuple
 
     mask_file = Path(mask_file)
     out_path = mask_file.parent / mask_file.name.replace("_masks.npz", "_masks_post.npz")
@@ -625,6 +725,18 @@ def _process_single_file(args_tuple):
         scanline_fill_enabled=scanline_fill_enabled,
         scanline_source_label=scanline_source_label,
         scanline_fill_value=scanline_fill_value,
+        topleft_rect_enabled=topleft_rect_enabled,
+        topleft_rect_label=topleft_rect_label,
+        topleft_rect_fill=topleft_rect_fill,
+        topleft_rect_y_max=topleft_rect_y_max,
+        topleft_rect_frame_start=topleft_rect_frame_start,
+        topleft_rect_frame_end_ratio=topleft_rect_frame_end_ratio,
+        topright_rect_enabled=topright_rect_enabled,
+        topright_rect_label=topright_rect_label,
+        topright_rect_fill=topright_rect_fill,
+        topright_rect_y_max=topright_rect_y_max,
+        topright_rect_y_threshold=topright_rect_y_threshold,
+        topright_rect_frame_start_ratio=topright_rect_frame_start_ratio,
     )
 
     # Save
@@ -661,7 +773,19 @@ def process_directory(input_dir: Path,
                       table_top_corner_ranges=None,
                       scanline_fill_enabled=False,
                       scanline_source_label=1,
-                      scanline_fill_value=3):
+                      scanline_fill_value=3,
+                      topleft_rect_enabled=False,
+                      topleft_rect_label=1,
+                      topleft_rect_fill=5,
+                      topleft_rect_y_max=420,
+                      topleft_rect_frame_start=10,
+                      topleft_rect_frame_end_ratio=0.667,
+                      topright_rect_enabled=False,
+                      topright_rect_label=1,
+                      topright_rect_fill=5,
+                      topright_rect_y_max=420,
+                      topright_rect_y_threshold=200,
+                      topright_rect_frame_start_ratio=0.667):
     """
     Process all *_masks.npz files in a directory.
     Output: *_masks_post.npz
@@ -696,7 +820,11 @@ def process_directory(input_dir: Path,
          overwrite, fill_bg_roi_list,
          fill_table_top_line_enabled, table_top_label, table_top_fill_target,
          table_top_corner_ranges,
-         scanline_fill_enabled, scanline_source_label, scanline_fill_value)
+         scanline_fill_enabled, scanline_source_label, scanline_fill_value,
+         topleft_rect_enabled, topleft_rect_label, topleft_rect_fill,
+         topleft_rect_y_max, topleft_rect_frame_start, topleft_rect_frame_end_ratio,
+         topright_rect_enabled, topright_rect_label, topright_rect_fill,
+         topright_rect_y_max, topright_rect_y_threshold, topright_rect_frame_start_ratio)
         for mask_file in mask_files
     ]
 
@@ -889,6 +1017,27 @@ def main():
                         help='Label to scan for in scanline fill (default: 1).')
     parser.add_argument('--scanline_fill_value', type=int, default=3,
                         help='Value to fill background with in scanline fill (default: 3).')
+    parser.add_argument('--topleft_rect', action='store_true',
+                        help='Fill bg in rect left-below the top-left corner of a label (first 2/3).')
+    parser.add_argument('--topright_rect', action='store_true',
+                        help='Fill bg in rect left-below the top-right corner of a label (last 1/3).')
+    parser.add_argument('--topleft_rect_label', type=int, default=1,
+                        help='Source label to find top-left corner (default: 1).')
+    parser.add_argument('--topleft_rect_fill', type=int, default=5,
+                        help='Fill value for topleft rect (default: 5).')
+    parser.add_argument('--topleft_rect_y_max', type=int, default=420,
+                        help='Bottom boundary of fill rect (default: 420).')
+    parser.add_argument('--topleft_rect_frame_start', type=int, default=10,
+                        help='First frame to apply (default: 10).')
+    parser.add_argument('--topleft_rect_frame_end_ratio', type=float, default=0.667,
+                        help='Fraction of video to apply (default: 0.667).')
+    parser.add_argument('--topright_rect_label', type=int, default=1)
+    parser.add_argument('--topright_rect_fill', type=int, default=5)
+    parser.add_argument('--topright_rect_y_max', type=int, default=420)
+    parser.add_argument('--topright_rect_y_threshold', type=int, default=200,
+                        help='Only consider label pixels with y < this (default: 200).')
+    parser.add_argument('--topright_rect_frame_start_ratio', type=float, default=0.667,
+                        help='Start ratio of video (default: 0.667 = last 1/3).')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing *_masks_post.npz files')
     parser.add_argument('--copy_to_dataset_root', type=str, default=None,
@@ -994,6 +1143,18 @@ def main():
                 scanline_fill_enabled=args.scanline_fill,
                 scanline_source_label=args.scanline_source_label,
                 scanline_fill_value=args.scanline_fill_value,
+                topleft_rect_enabled=args.topleft_rect,
+                topleft_rect_label=args.topleft_rect_label,
+                topleft_rect_fill=args.topleft_rect_fill,
+                topleft_rect_y_max=args.topleft_rect_y_max,
+                topleft_rect_frame_start=args.topleft_rect_frame_start,
+                topleft_rect_frame_end_ratio=args.topleft_rect_frame_end_ratio,
+                topright_rect_enabled=args.topright_rect,
+                topright_rect_label=args.topright_rect_label,
+                topright_rect_fill=args.topright_rect_fill,
+                topright_rect_y_max=args.topright_rect_y_max,
+                topright_rect_y_threshold=args.topright_rect_y_threshold,
+                topright_rect_frame_start_ratio=args.topright_rect_frame_start_ratio,
             )
 
         print("\nAll done!")

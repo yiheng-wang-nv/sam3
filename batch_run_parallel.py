@@ -100,6 +100,18 @@ def run_worker(
     pp_per_camera=None,
     skip_if_exists=False,
     static_prompts=None,
+    pp_topleft_rect=False,
+    pp_topleft_rect_label=1,
+    pp_topleft_rect_fill=5,
+    pp_topleft_rect_y_max=420,
+    pp_topleft_rect_frame_start=10,
+    pp_topleft_rect_frame_end_ratio=0.667,
+    pp_topright_rect=False,
+    pp_topright_rect_label=1,
+    pp_topright_rect_fill=5,
+    pp_topright_rect_y_max=420,
+    pp_topright_rect_y_threshold=200,
+    pp_topright_rect_frame_start_ratio=0.667,
 ):
     """Worker function for GPU-based segmentation inference (PKL only, no video)"""
     
@@ -213,7 +225,25 @@ def run_worker(
             if cam_classes:
                 cmd += ["--pp_fill_interior_class", ",".join(str(x) for x in cam_classes)]
                 cmd += ["--pp_fill_interior_target", str(cam_target)]
-        
+            if pp_topleft_rect:
+                cmd += [
+                    "--pp_topleft_rect",
+                    "--pp_topleft_rect_label", str(pp_topleft_rect_label),
+                    "--pp_topleft_rect_fill", str(pp_topleft_rect_fill),
+                    "--pp_topleft_rect_y_max", str(pp_topleft_rect_y_max),
+                    "--pp_topleft_rect_frame_start", str(pp_topleft_rect_frame_start),
+                    "--pp_topleft_rect_frame_end_ratio", str(pp_topleft_rect_frame_end_ratio),
+                ]
+            if pp_topright_rect:
+                cmd += [
+                    "--pp_topright_rect",
+                    "--pp_topright_rect_label", str(pp_topright_rect_label),
+                    "--pp_topright_rect_fill", str(pp_topright_rect_fill),
+                    "--pp_topright_rect_y_max", str(pp_topright_rect_y_max),
+                    "--pp_topright_rect_y_threshold", str(pp_topright_rect_y_threshold),
+                    "--pp_topright_rect_frame_start_ratio", str(pp_topright_rect_frame_start_ratio),
+                ]
+
         try:
             subprocess.run(cmd, env=env, check=True)
         except subprocess.CalledProcessError as e:
@@ -241,7 +271,8 @@ if __name__ == "__main__":
     parser.add_argument("--npz_separate", action="store_true", help="Keep objects separate in npz.")
     parser.add_argument("--no_pkl", action="store_true", help="Do not save pkl outputs.")
     parser.add_argument("--debug_one", action="store_true", help="Randomly pick one video and run once.")
-    parser.add_argument("--debug_seed", type=int, default=None, help="Random seed for debug_one.")
+    parser.add_argument("--debug_n", type=int, default=None, help="Randomly pick N videos and run (overrides debug_one).")
+    parser.add_argument("--debug_seed", type=int, default=None, help="Random seed for debug_one/debug_n.")
     parser.add_argument("--invert_mask", action="store_true", help="Invert masks in outputs.")
     parser.add_argument("--postprocess", action="store_true", help="Run postprocess on npz masks after segmentation.")
     parser.add_argument("--pp_min_hole_size", type=int, default=64, help="Postprocess: fill holes smaller than this.")
@@ -271,6 +302,18 @@ if __name__ == "__main__":
     parser.add_argument("--pp_scanline_fill", action="store_true", help="Postprocess: row-based fill between first/last source_label pixels.")
     parser.add_argument("--pp_scanline_source_label", type=int, default=1, help="Postprocess: label to scan for in scanline fill (default: 1).")
     parser.add_argument("--pp_scanline_fill_value", type=int, default=3, help="Postprocess: value to fill background with in scanline fill (default: 3).")
+    parser.add_argument("--pp_topleft_rect", action="store_true", help="Postprocess: fill bg rect left-below top-left corner of a label.")
+    parser.add_argument("--pp_topleft_rect_label", type=int, default=1)
+    parser.add_argument("--pp_topleft_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_topleft_rect_y_max", type=int, default=420)
+    parser.add_argument("--pp_topleft_rect_frame_start", type=int, default=10)
+    parser.add_argument("--pp_topleft_rect_frame_end_ratio", type=float, default=0.667)
+    parser.add_argument("--pp_topright_rect", action="store_true", help="Postprocess: fill bg rect left-below top-right corner (last 1/3).")
+    parser.add_argument("--pp_topright_rect_label", type=int, default=1)
+    parser.add_argument("--pp_topright_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_topright_rect_y_max", type=int, default=420)
+    parser.add_argument("--pp_topright_rect_y_threshold", type=int, default=200)
+    parser.add_argument("--pp_topright_rect_frame_start_ratio", type=float, default=0.667)
     parser.add_argument("--pp_overwrite", action="store_true", help="Postprocess: overwrite existing *_masks_post.npz.")
     parser.add_argument(
         "--pp_per_camera",
@@ -328,13 +371,15 @@ if __name__ == "__main__":
         
     print(f"Total videos to process: {len(all_videos)}")
     
-    # Debug mode: pick one random video
-    if args.debug_one:
+    # Debug mode: pick random video(s)
+    debug_sample = args.debug_n if args.debug_n else (1 if args.debug_one else 0)
+    if debug_sample > 0:
         import random
-
         if args.debug_seed is not None:
             random.seed(args.debug_seed)
-        all_videos = [random.choice(all_videos)]
+        n = min(debug_sample, len(all_videos))
+        all_videos = random.sample(all_videos, n)
+        print(f"Debug mode: sampled {n} video(s)")
 
     # 2. Assign GPUs
     if args.gpu_ids:
@@ -345,7 +390,7 @@ if __name__ == "__main__":
     print(f"Using GPUs: {gpu_ids}")
     
     # 3. Distribute work across GPUs
-    if args.debug_one:
+    if debug_sample == 1:
         gpu_ids = [gpu_ids[0]]
     chunks = chunk_list(all_videos, len(gpu_ids))
     
@@ -398,6 +443,18 @@ if __name__ == "__main__":
                     per_camera,
                     args.skip_if_exists,
                     args.static_prompts,
+                    args.pp_topleft_rect,
+                    args.pp_topleft_rect_label,
+                    args.pp_topleft_rect_fill,
+                    args.pp_topleft_rect_y_max,
+                    args.pp_topleft_rect_frame_start,
+                    args.pp_topleft_rect_frame_end_ratio,
+                    args.pp_topright_rect,
+                    args.pp_topright_rect_label,
+                    args.pp_topright_rect_fill,
+                    args.pp_topright_rect_y_max,
+                    args.pp_topright_rect_y_threshold,
+                    args.pp_topright_rect_frame_start_ratio,
                 )
             )
             processes.append(p)
@@ -488,6 +545,18 @@ if __name__ == "__main__":
                         scanline_fill_enabled=args.pp_scanline_fill,
                         scanline_source_label=args.pp_scanline_source_label,
                         scanline_fill_value=args.pp_scanline_fill_value,
+                        topleft_rect_enabled=args.pp_topleft_rect,
+                        topleft_rect_label=args.pp_topleft_rect_label,
+                        topleft_rect_fill=args.pp_topleft_rect_fill,
+                        topleft_rect_y_max=args.pp_topleft_rect_y_max,
+                        topleft_rect_frame_start=args.pp_topleft_rect_frame_start,
+                        topleft_rect_frame_end_ratio=args.pp_topleft_rect_frame_end_ratio,
+                        topright_rect_enabled=args.pp_topright_rect,
+                        topright_rect_label=args.pp_topright_rect_label,
+                        topright_rect_fill=args.pp_topright_rect_fill,
+                        topright_rect_y_max=args.pp_topright_rect_y_max,
+                        topright_rect_y_threshold=args.pp_topright_rect_y_threshold,
+                        topright_rect_frame_start_ratio=args.pp_topright_rect_frame_start_ratio,
                     )
 
     print("All segmentation tasks completed.")

@@ -8,7 +8,7 @@ import argparse
 import pickle
 from sam3.visualization_utils import load_frame, render_masklet_frame, save_masklet_video
 from sam3.model_builder import build_sam3_video_predictor
-from postprocess_masks import postprocess_video_masks
+from postprocess_masks import postprocess_video_masks, parse_fill_bg_roi
 
 
 def parse_points(points_str):
@@ -394,6 +394,41 @@ def parse_args():
         default=None,
         help="Prompts whose mask is static (segment frame 0 only, replicate to all frames).",
     )
+    parser.add_argument(
+        "--postprocess_only",
+        action="store_true",
+        help="Skip inference. Load existing *_masks.npz, run postprocessing, save *_masks_post.npz.",
+    )
+    parser.add_argument(
+        "--pp_fill_bg_roi",
+        type=str,
+        action="append",
+        default=None,
+        help='Fill background in ROI. Format: "frame_start,frame_end_ratio,y_min,y_max,x_min,x_max,target". '
+             'Use -1 for full range. Can be specified multiple times.',
+    )
+    parser.add_argument(
+        "--pp_overwrite",
+        action="store_true",
+        help="Overwrite existing *_masks_post.npz (used with --postprocess_only).",
+    )
+    parser.add_argument(
+        "--pp_topleft_rect",
+        action="store_true",
+        help="Fill bg in rect left-below the top-left corner of a label.",
+    )
+    parser.add_argument("--pp_topleft_rect_label", type=int, default=1)
+    parser.add_argument("--pp_topleft_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_topleft_rect_y_max", type=int, default=420)
+    parser.add_argument("--pp_topleft_rect_frame_start", type=int, default=10)
+    parser.add_argument("--pp_topleft_rect_frame_end_ratio", type=float, default=0.667)
+    parser.add_argument("--pp_topright_rect", action="store_true",
+                        help="Fill bg rect left-below top-right corner of a label (last 1/3).")
+    parser.add_argument("--pp_topright_rect_label", type=int, default=1)
+    parser.add_argument("--pp_topright_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_topright_rect_y_max", type=int, default=420)
+    parser.add_argument("--pp_topright_rect_y_threshold", type=int, default=200)
+    parser.add_argument("--pp_topright_rect_frame_start_ratio", type=float, default=0.667)
     return parser.parse_args()
 
 def propagate_in_video(predictor, session_id, max_frames=None):
@@ -408,11 +443,126 @@ def propagate_in_video(predictor, session_id, max_frames=None):
         outputs_per_frame[response["frame_index"]] = response["outputs"]
     return outputs_per_frame
 
+def _run_postprocess_only(args):
+    """Load existing *_masks.npz, apply postprocessing, save *_masks_post.npz and optional vis."""
+    video_path = args.video_path
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    if not video_name and os.path.isdir(video_path):
+        video_name = os.path.basename(os.path.normpath(video_path))
+
+    raw_npz_path = os.path.join(args.output_dir, f"{video_name}_masks.npz")
+    post_npz_path = os.path.join(args.output_dir, f"{video_name}_masks_post.npz")
+
+    if not os.path.exists(raw_npz_path):
+        print(f"Error: Raw masks not found: {raw_npz_path}")
+        return
+
+    if os.path.exists(post_npz_path) and not args.pp_overwrite:
+        print(f"Skipping (already exists): {post_npz_path}  (use --pp_overwrite to redo)")
+        return
+
+    print(f"[postprocess_only] Loading raw masks from {raw_npz_path}")
+    data = np.load(raw_npz_path)
+    label_masks = data["arr_0"]  # (T, H, W)
+    T, H, W = label_masks.shape
+    frame_indices = list(range(T))
+    print(f"  Loaded masks: {label_masks.shape}, labels present: {np.unique(label_masks).tolist()}")
+
+    max_label = int(label_masks.max())
+    num_classes = max_label + 1
+
+    fill_classes = _parse_class_list(args.pp_fill_interior_class)
+    fill_bg_roi_list = None
+    if args.pp_fill_bg_roi:
+        fill_bg_roi_list = [parse_fill_bg_roi(s) for s in args.pp_fill_bg_roi]
+
+    processed = postprocess_video_masks(
+        label_masks,
+        num_classes=num_classes,
+        fill_holes=not args.pp_no_fill_holes,
+        min_hole_size=args.pp_min_hole_size,
+        min_object_size=args.pp_min_object_size,
+        closing_iterations=args.pp_closing_iterations,
+        fill_interior_class=fill_classes,
+        fill_interior_target=args.pp_fill_interior_target,
+        union_hole_fill=args.pp_union_hole_fill,
+        remove_small_objects_enabled=not args.pp_no_remove_small_objects,
+        union_gap_fill=args.pp_union_gap_fill,
+        union_gap_closing_iterations=args.pp_union_gap_closing_iterations,
+        fill_blue_table_quadrant_enabled=args.pp_fill_blue_table_quadrant,
+        blue_table_label=args.pp_blue_table_label,
+        blue_table_target=args.pp_blue_table_target,
+        blue_table_quadrant_mode=args.pp_blue_table_quadrant_mode,
+        blue_table_y_pad_top=args.pp_blue_table_y_pad_top,
+        blue_table_y_pad_bottom=args.pp_blue_table_y_pad_bottom,
+        blue_table_skip_if_label_above=args.pp_blue_table_skip_if_label_above,
+        blue_table_skip_if_label_area_gt=args.pp_blue_table_skip_if_label_area_gt,
+        fill_bg_roi_list=fill_bg_roi_list,
+        scanline_fill_enabled=args.pp_scanline_fill,
+        scanline_source_label=args.pp_scanline_source_label,
+        scanline_fill_value=args.pp_scanline_fill_value,
+        topleft_rect_enabled=args.pp_topleft_rect,
+        topleft_rect_label=args.pp_topleft_rect_label,
+        topleft_rect_fill=args.pp_topleft_rect_fill,
+        topleft_rect_y_max=args.pp_topleft_rect_y_max,
+        topleft_rect_frame_start=args.pp_topleft_rect_frame_start,
+        topleft_rect_frame_end_ratio=args.pp_topleft_rect_frame_end_ratio,
+        topright_rect_enabled=args.pp_topright_rect,
+        topright_rect_label=args.pp_topright_rect_label,
+        topright_rect_fill=args.pp_topright_rect_fill,
+        topright_rect_y_max=args.pp_topright_rect_y_max,
+        topright_rect_y_threshold=args.pp_topright_rect_y_threshold,
+        topright_rect_frame_start_ratio=args.pp_topright_rect_frame_start_ratio,
+    )
+
+    np.savez_compressed(post_npz_path, arr_0=processed)
+    print(f"  Saved postprocessed masks: {post_npz_path}")
+    print(f"  Labels after postprocess: {np.unique(processed).tolist()}")
+
+    if args.save_side_by_side:
+        vis_outputs = label_masks_to_outputs(processed, frame_indices)
+        if isinstance(video_path, str) and video_path.endswith(".mp4"):
+            cap = cv2.VideoCapture(video_path)
+            video_frames = []
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                video_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            cap.release()
+        else:
+            video_frames = sorted(glob.glob(os.path.join(video_path, "*.jpg")))
+
+        if video_frames:
+            output_compare_path = os.path.join(args.output_dir, f"{video_name}_compare.mp4")
+            print(f"  Saving side-by-side video to {output_compare_path}")
+            first_frame = load_frame(video_frames[0])
+            height, width = first_frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(output_compare_path, fourcc, args.fps, (width * 2, height))
+            for frame_idx in sorted(vis_outputs.keys()):
+                frame = load_frame(video_frames[frame_idx])
+                overlay = render_masklet_frame(frame, vis_outputs[frame_idx], frame_idx=None)
+                masks = vis_outputs[frame_idx]["out_binary_masks"]
+                combined = np.any(masks, axis=0) if masks.size > 0 else np.zeros(frame.shape[:2], dtype=bool)
+                overlay[~combined] = 0
+                compare = np.concatenate([frame, overlay], axis=1)
+                writer.write(cv2.cvtColor(compare, cv2.COLOR_RGB2BGR))
+            writer.release()
+            print(f"  Side-by-side video saved to {output_compare_path}")
+
+    print("[postprocess_only] Done.")
+
+
 def main():
     args = parse_args()
     
     # Ensure output directory exists
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.postprocess_only:
+        _run_postprocess_only(args)
+        return
     
     print(f"Loading model from {args.checkpoint_path}...")
     video_predictor = build_sam3_video_predictor(args.checkpoint_path)
@@ -810,6 +960,18 @@ def main():
             scanline_fill_enabled=args.pp_scanline_fill,
             scanline_source_label=args.pp_scanline_source_label,
             scanline_fill_value=args.pp_scanline_fill_value,
+            topleft_rect_enabled=args.pp_topleft_rect,
+            topleft_rect_label=args.pp_topleft_rect_label,
+            topleft_rect_fill=args.pp_topleft_rect_fill,
+            topleft_rect_y_max=args.pp_topleft_rect_y_max,
+            topleft_rect_frame_start=args.pp_topleft_rect_frame_start,
+            topleft_rect_frame_end_ratio=args.pp_topleft_rect_frame_end_ratio,
+            topright_rect_enabled=args.pp_topright_rect,
+            topright_rect_label=args.pp_topright_rect_label,
+            topright_rect_fill=args.pp_topright_rect_fill,
+            topright_rect_y_max=args.pp_topright_rect_y_max,
+            topright_rect_y_threshold=args.pp_topright_rect_y_threshold,
+            topright_rect_frame_start_ratio=args.pp_topright_rect_frame_start_ratio,
         )
         vis_outputs = label_masks_to_outputs(processed, frame_indices)
 
