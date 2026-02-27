@@ -74,7 +74,7 @@ conda activate sam3
 2. **Install PyTorch with CUDA support:**
 
 ```bash
-pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
 3. **Clone the repository and install the package:**

@@ -18,10 +18,10 @@ HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # GPU Selection
-GPU_IDS="0 1 2 3 4 5 6 7"
+GPU_IDS="0 1 2 3"
 
 # Postprocess settings (shared)
-PP_NUM_WORKERS=32
+PP_NUM_WORKERS=128
 PP_MIN_HOLE_SIZE=64
 PP_MIN_OBJECT_SIZE=50
 PP_CLOSING_ITERATIONS=1

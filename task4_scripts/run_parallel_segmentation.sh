@@ -17,7 +17,7 @@ HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # GPU Selection
-GPU_IDS="0 1 2 3 4 5 6 7"
+GPU_IDS="0 1 2 3"
 
 # Postprocess settings (shared)
 PP_NUM_WORKERS=96

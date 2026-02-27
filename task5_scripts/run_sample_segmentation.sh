@@ -8,8 +8,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task5-1_02030204021002130214_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task5-1_02030204021002130214_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task5-2_01300203020402100214_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task5-2_01300203020402100214_merged/sam3_output"
 
 # Prompts (per camera)
 HEAD_RIGHT_PROMPTS=("blue table" "robotic arm(s)")
@@ -20,9 +20,9 @@ HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # Sampling
-SAMPLE_N=2
+SAMPLE_N=4
 SAMPLE_SEED=42
-GPU_IDS="0 1 2 3 4 5 6 7"
+GPU_IDS="0 1 2 3"
 
 # Postprocess settings (shared)
 PP_NUM_WORKERS=32

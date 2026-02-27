@@ -1,80 +1,199 @@
 #!/bin/bash
 
-# SAM3 checkpoint path
-CHECKPOINT="/localhome/local-vennw/code/3rd_sam3/sam3.pt"
+# Run segmentation on a subset of episodes — either specific indices or random N.
+#
+# Usage:
+#   # Specific episodes (comma-separated):
+#   bash run_segmentation.sh --episodes 5,10,15,20
+#
+#   # Random N episodes:
+#   bash run_segmentation.sh --random 5
+#   bash run_segmentation.sh --random 5 --seed 123
+#
+#   # Override GPU list:
+#   bash run_segmentation.sh --random 3 --gpus "0 1"
 
-# base directory
-BASE_DIR="/localhome/local-vennw/code/orca-dev-galbot-1/galbot_lerobot_dataset/task7_20260106_no_rnd_lerobot/videos/chunk-000"
+set -euo pipefail
 
-# define the 4 camera views to process
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
+
+# ──────────────── Configuration ────────────────
+CHECKPOINT="${SAM3_DIR}/sam3.pt"
+BASE_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/sam3_output"
+
+PROMPTS=("blue table" "robotic arm(s)" "tools" "trash can")
+
+HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
+RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
+
 CAMERAS=(
-    "observation.images.head_left_camera_color_optical_frame"
-    "observation.images.head_right_camera_color_optical_frame"
-    "observation.images.left_arm_camera_color_optical_frame"
-    "observation.images.right_arm_camera_color_optical_frame"
+    "$HEAD_RIGHT_CAMERA"
+    "$RIGHT_ARM_CAMERA"
 )
 
-# define prompts
-PROMPTS=("blue table" "robotic arm(s)" "silver box")
+GPU_IDS="0 1 2 3"
 
-# output directory
-BASE_OUTPUT_DIR="output/task7_segmentation"
+# Per-episode point clicks JSON (set to "" to disable)
+POINT_CLICKS_JSON="/localhome/local-vennw/code/task4-1_020202050212_merged/point_clicks.json"
 
-# flag to control video generation (true/false)
-GENERATE_VIDEO=true
+# Postprocess settings
+PP_NUM_WORKERS=96
+PP_MIN_HOLE_SIZE=64
+PP_MIN_OBJECT_SIZE=50
+PP_CLOSING_ITERATIONS=1
+PP_NO_REMOVE_SMALL_OBJECTS=true
+PP_UNION_HOLE_FILL=true
+PP_UNION_GAP_FILL=true
+PP_UNION_GAP_CLOSING_ITERATIONS=1
+PP_FILL_CLASS="1,2,3,4,5"
+PP_FILL_TARGET=6
 
-# process each video
-for camera in "${CAMERAS[@]}"; do
-    VIDEO_PATH="${BASE_DIR}/${camera}/episode_000000.mp4"
-    CAMERA_OUTPUT_DIR="${BASE_OUTPUT_DIR}/${camera}"
-    
-    echo "========================================"
-    echo "Processing: $camera"
-    echo "Video path: $VIDEO_PATH"
-    echo "Output dir: $CAMERA_OUTPUT_DIR"
-    echo "========================================"
+# ──────────────── Parse CLI args ────────────────
+MODE=""
+EPISODES_CSV=""
+NUM_RANDOM=0
+SEED=42
 
-    # 1. Run inference to generate PKL only
-    # Note: removed --save_video flag from here since we handle it separately
-    python produce_masks.py \
-        --video_path "$VIDEO_PATH" \
-        --checkpoint_path "$CHECKPOINT" \
-        --output_dir "$CAMERA_OUTPUT_DIR" \
-        --prompts "${PROMPTS[@]}" \
-        --fps 30
-
-    if [ $? -eq 0 ]; then
-        echo "✅ Segmentation successful: $camera"
-        
-        # 2. Optionally generate video using the separate script
-        if [ "$GENERATE_VIDEO" = true ]; then
-            echo "🎬 Generating video visualization..."
-            
-            # Construct paths
-            # Note: produce_masks.py names the pkl as {video_name}_segmentation_results.pkl
-            # Here video_name is 'episode_000000'
-            PKL_PATH="${CAMERA_OUTPUT_DIR}/episode_000000_segmentation_results.pkl"
-            OUTPUT_VIDEO_PATH="${CAMERA_OUTPUT_DIR}/episode_000000_vis.mp4"
-            
-            python render_video.py \
-                --pkl_path "$PKL_PATH" \
-                --video_path "$VIDEO_PATH" \
-                --output_path "$OUTPUT_VIDEO_PATH" \
-                --fps 30
-                
-            if [ $? -eq 0 ]; then
-                echo "✅ Video generation successful"
-            else
-                echo "❌ Video generation failed"
-            fi
-        else
-            echo "⏭️  Skipping video generation"
-        fi
-        
-    else
-        echo "❌ Segmentation failed: $camera"
-    fi
-    echo ""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --episodes)
+      MODE="specific"
+      EPISODES_CSV="$2"
+      shift 2
+      ;;
+    --random)
+      MODE="random"
+      NUM_RANDOM="$2"
+      shift 2
+      ;;
+    --seed)
+      SEED="$2"
+      shift 2
+      ;;
+    --gpus)
+      GPU_IDS="$2"
+      shift 2
+      ;;
+    --point-clicks)
+      POINT_CLICKS_JSON="$2"
+      shift 2
+      ;;
+    --no-point-clicks)
+      POINT_CLICKS_JSON=""
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      echo "Usage: $0 --episodes 5,10,15  OR  $0 --random 5 [--seed 42] [--gpus '0 1'] [--point-clicks path.json] [--no-point-clicks]"
+      exit 1
+      ;;
+  esac
 done
 
-echo "🎉 All videos processed! Results saved in: $BASE_OUTPUT_DIR"
+if [ -z "$MODE" ]; then
+  echo "Error: must specify --episodes <indices> or --random <N>"
+  echo "Usage:"
+  echo "  $0 --episodes 5,10,15,20"
+  echo "  $0 --random 5 [--seed 42] [--gpus '0 1']"
+  exit 1
+fi
+
+# ──────────────── Build common postprocess flags ────────────────
+PP_FLAGS=(
+  --pp_num_workers "$PP_NUM_WORKERS"
+  --pp_min_hole_size "$PP_MIN_HOLE_SIZE"
+  --pp_min_object_size "$PP_MIN_OBJECT_SIZE"
+  --pp_closing_iterations "$PP_CLOSING_ITERATIONS"
+  --pp_fill_interior_class "$PP_FILL_CLASS"
+  --pp_fill_interior_target "$PP_FILL_TARGET"
+  --pp_overwrite
+)
+[ "$PP_NO_REMOVE_SMALL_OBJECTS" = true ] && PP_FLAGS+=(--pp_no_remove_small_objects)
+[ "$PP_UNION_HOLE_FILL" = true ] && PP_FLAGS+=(--pp_union_hole_fill)
+if [ "$PP_UNION_GAP_FILL" = true ]; then
+  PP_FLAGS+=(--pp_union_gap_fill --pp_union_gap_closing_iterations "$PP_UNION_GAP_CLOSING_ITERATIONS")
+fi
+
+POINT_CLICKS_FLAG=()
+if [ -n "$POINT_CLICKS_JSON" ] && [ -f "$POINT_CLICKS_JSON" ]; then
+  POINT_CLICKS_FLAG=(--point_clicks_json "$POINT_CLICKS_JSON")
+  echo "Point clicks: $POINT_CLICKS_JSON"
+fi
+
+# ──────────────── Mode: random N ────────────────
+if [ "$MODE" = "random" ]; then
+  echo "🚀 Running segmentation on ${NUM_RANDOM} random episodes (seed=${SEED})"
+  echo "--------------------------------------------------------------------"
+  echo "GPUs: ${GPU_IDS}"
+  echo "--------------------------------------------------------------------"
+
+  python "${SAM3_DIR}/batch_run_parallel.py" \
+    --base_dir "$BASE_DIR" \
+    --checkpoint "$CHECKPOINT" \
+    --output_dir "$BASE_OUTPUT_DIR" \
+    --cameras "${CAMERAS[@]}" \
+    --prompts "${PROMPTS[@]}" \
+    --save_npz \
+    --no_pkl \
+    --postprocess \
+    "${PP_FLAGS[@]}" \
+    --debug_n "$NUM_RANDOM" \
+    --debug_seed "$SEED" \
+    "${POINT_CLICKS_FLAG[@]}" \
+    --gpu_ids $GPU_IDS
+
+  echo "🎉 Done (random ${NUM_RANDOM} episodes)!"
+  exit 0
+fi
+
+# ──────────────── Mode: specific episodes ────────────────
+IFS=',' read -ra EP_INDICES <<< "$EPISODES_CSV"
+
+echo "🚀 Running segmentation on ${#EP_INDICES[@]} specific episodes: ${EPISODES_CSV}"
+echo "--------------------------------------------------------------------"
+echo "Cameras: ${CAMERAS[*]}"
+echo "GPUs: ${GPU_IDS}"
+echo "--------------------------------------------------------------------"
+
+# Build a temp directory with symlinks to the requested episode videos
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+for cam in "${CAMERAS[@]}"; do
+  mkdir -p "${TMPDIR}/${cam}"
+  for idx in "${EP_INDICES[@]}"; do
+    idx=$(echo "$idx" | tr -d ' ')
+    ep_name=$(printf "episode_%06d" "$idx")
+    src="${BASE_DIR}/${cam}/${ep_name}.mp4"
+    if [ ! -f "$src" ]; then
+      echo "Warning: ${cam}/${ep_name}.mp4 not found, skipping"
+      continue
+    fi
+    ln -s "$src" "${TMPDIR}/${cam}/${ep_name}.mp4"
+  done
+done
+
+# Count total linked videos
+TOTAL=$(find "$TMPDIR" -name '*.mp4' | wc -l)
+if [ "$TOTAL" -eq 0 ]; then
+  echo "Error: no matching episode videos found."
+  exit 1
+fi
+echo "Found ${TOTAL} video files to process."
+
+python "${SAM3_DIR}/batch_run_parallel.py" \
+  --base_dir "$TMPDIR" \
+  --checkpoint "$CHECKPOINT" \
+  --output_dir "$BASE_OUTPUT_DIR" \
+  --cameras "${CAMERAS[@]}" \
+  --prompts "${PROMPTS[@]}" \
+  --save_npz \
+  --no_pkl \
+  --postprocess \
+  "${PP_FLAGS[@]}" \
+  "${POINT_CLICKS_FLAG[@]}" \
+  --gpu_ids $GPU_IDS
+
+echo "🎉 Done (episodes: ${EPISODES_CSV})!"

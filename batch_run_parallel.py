@@ -70,6 +70,7 @@ def run_worker(
     points_frame_idx=None,
     points_by_frame=None,
     point_labels_by_frame=None,
+    points_prompt_idx=None,
     save_video=False,
     save_side_by_side=False,
     max_frames=None,
@@ -112,6 +113,7 @@ def run_worker(
     pp_topright_rect_y_max=420,
     pp_topright_rect_y_threshold=200,
     pp_topright_rect_frame_start_ratio=0.667,
+    point_clicks=None,
 ):
     """Worker function for GPU-based segmentation inference (PKL only, no video)"""
     
@@ -133,13 +135,12 @@ def run_worker(
         except IndexError:
             print(f"[Worker GPU {gpu_id}] Could not parse path structure for {video_path}, using flat output.")
             output_dir = base_output_dir
+            camera_name = ""
+
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
 
         # Check if output already exists
         if skip_if_exists:
-            video_filename = os.path.basename(video_path)
-            # Assuming output filename format: {video_name}_masks.npz
-            # video_name usually is video_filename without extension
-            video_name = os.path.splitext(video_filename)[0]
             expected_output = os.path.join(output_dir, f"{video_name}_masks.npz")
             expected_post_output = os.path.join(output_dir, f"{video_name}_masks_post.npz")
             if os.path.exists(expected_output) or os.path.exists(expected_post_output):
@@ -157,16 +158,45 @@ def run_worker(
             "--prompts"
         ] + prompts
 
-        if points:
-            cmd += ["--points", points]
-        if point_labels:
-            cmd += ["--point_labels", point_labels]
-        if points_frame_idx is not None:
-            cmd += ["--points_frame_idx", str(points_frame_idx)]
-        if points_by_frame:
-            cmd += ["--points_by_frame", points_by_frame]
-        if point_labels_by_frame:
-            cmd += ["--point_labels_by_frame", point_labels_by_frame]
+        # Per-episode point clicks override global points
+        ep_clicks = None
+        if point_clicks and camera_name:
+            ep_clicks = point_clicks.get(camera_name, {}).get(video_name, {})
+
+        ep_prompt_idx = points_prompt_idx
+        if ep_clicks:
+            pbf_parts = []
+            plbf_parts = []
+            frame_count = 0
+            mask_label = None
+            for frame_idx, entry in ep_clicks.items():
+                if not isinstance(entry, dict) or "points" not in entry:
+                    continue
+                pbf_parts.append(f"{frame_idx}:{entry['points']}")
+                n_pts = len(entry['points'].split(';'))
+                plbf_parts.append(f"{frame_idx}:{','.join(['1'] * n_pts)}")
+                if mask_label is None:
+                    first_label = int(entry['labels'].split(',')[0])
+                    mask_label = first_label
+                frame_count += 1
+            if mask_label is not None:
+                ep_prompt_idx = mask_label - 1
+            cmd += ["--points_by_frame", "|".join(pbf_parts)]
+            cmd += ["--point_labels_by_frame", "|".join(plbf_parts)]
+            print(f"[Worker GPU {gpu_id}]   Using point_clicks for {camera_name}/{video_name} ({frame_count} frames, mask_label={mask_label}, prompt_idx={ep_prompt_idx})")
+        else:
+            if points:
+                cmd += ["--points", points]
+            if point_labels:
+                cmd += ["--point_labels", point_labels]
+            if points_frame_idx is not None:
+                cmd += ["--points_frame_idx", str(points_frame_idx)]
+            if points_by_frame:
+                cmd += ["--points_by_frame", points_by_frame]
+            if point_labels_by_frame:
+                cmd += ["--point_labels_by_frame", point_labels_by_frame]
+        if ep_prompt_idx is not None:
+            cmd += ["--points_prompt_idx", str(ep_prompt_idx)]
         if save_video:
             cmd += ["--save_video"]
         if save_side_by_side:
@@ -264,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--points_frame_idx", type=int, default=None, help="Frame index for points.")
     parser.add_argument("--points_by_frame", type=str, default=None, help="Multiple frames: 'frame: x1,y1;...|frame: x1,y1;...'.")
     parser.add_argument("--point_labels_by_frame", type=str, default=None, help="Labels per frame: 'frame:1,0|frame:1,1'.")
+    parser.add_argument("--points_prompt_idx", type=int, default=None, help="Assign point-click masks to this prompt index (0-based).")
     parser.add_argument("--save_video", action="store_true", help="Save visualization videos.")
     parser.add_argument("--save_side_by_side", action="store_true", help="Save side-by-side videos.")
     parser.add_argument("--max_frames", type=int, default=None, help="Only process first N frames.")
@@ -351,8 +382,24 @@ if __name__ == "__main__":
         help='Fill background in ROI. Format: "frame_start,frame_end_ratio,y_min,y_max,x_min,x_max,target". '
              'Use -1 for full range. Can be specified multiple times.',
     )
+    parser.add_argument(
+        "--point_clicks_json",
+        type=str,
+        default=None,
+        help='JSON file with per-episode point clicks. '
+             'Format: {"camera": {"episode": {"frame_idx": {"points": "x,y;...", "labels": "l,..."}}}}',
+    )
     
     args = parser.parse_args()
+    
+    # Load per-episode point clicks if provided
+    point_clicks = None
+    if args.point_clicks_json:
+        import json
+        with open(args.point_clicks_json) as f:
+            point_clicks = json.load(f)
+        total_eps = sum(len(eps) for eps in point_clicks.values())
+        print(f"Loaded point_clicks_json: {total_eps} episode(s) across {len(point_clicks)} camera(s)")
     
     # Get script directory (where this python file is located)
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -413,6 +460,7 @@ if __name__ == "__main__":
                     args.points_frame_idx,
                     args.points_by_frame,
                     args.point_labels_by_frame,
+                    args.points_prompt_idx,
                     args.save_video,
                     args.save_side_by_side,
                     args.max_frames,
@@ -455,6 +503,7 @@ if __name__ == "__main__":
                     args.pp_topright_rect_y_max,
                     args.pp_topright_rect_y_threshold,
                     args.pp_topright_rect_frame_start_ratio,
+                    point_clicks,
                 )
             )
             processes.append(p)

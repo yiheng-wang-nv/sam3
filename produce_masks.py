@@ -362,6 +362,13 @@ def parse_args():
         help="Labels per frame: 'frame:1,0|frame:1,1'.",
     )
     parser.add_argument(
+        "--points_prompt_idx",
+        type=int,
+        default=None,
+        help="Assign point-click masks to this prompt index (0-based). "
+             "If not set, points become an extra category after all prompts.",
+    )
+    parser.add_argument(
         "--max_frames",
         type=int,
         default=None,
@@ -813,7 +820,8 @@ def main():
                     "out_binary_masks": masks,
                 }
 
-        prompt_idx = len(prompts_list)
+        prompt_idx = args.points_prompt_idx if args.points_prompt_idx is not None else len(prompts_list)
+        print(f"Merging point-click masks as prompt_idx={prompt_idx} (mask label {prompt_idx + 1})")
         for frame_idx, frame_data in points_outputs.items():
             if frame_idx not in merged_outputs:
                 merged_outputs[frame_idx] = {
