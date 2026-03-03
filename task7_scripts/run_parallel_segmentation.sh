@@ -6,8 +6,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task7_01220206_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task7_01220206_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task7_0122020602240228_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task7_0122020602240228_merged/sam3_output"
 
 # Prompts (same for all cameras)
 PROMPTS=("blue table" "robotic arm(s)" "silver box")
@@ -19,7 +19,7 @@ LEFT_ARM_CAMERA="observation.images.left_arm_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # GPU Selection
-GPU_IDS="0 1 2 3 4 5 6 7"
+GPU_IDS="0 1 2 3 5 6 7"
 
 # Postprocess settings (shared)
 PP_NUM_WORKERS=96
@@ -60,6 +60,7 @@ python "${SAM3_DIR}/batch_run_parallel.py" \
   --save_npz \
   --no_pkl \
   --skip_if_exists \
+  --skip_if_masks_dir "/localhome/local-vennw/code/task7_0122020602240228_merged/masks" \
   --postprocess \
   --pp_num_workers "$PP_NUM_WORKERS" \
   --pp_min_hole_size "$PP_MIN_HOLE_SIZE" \

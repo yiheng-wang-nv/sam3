@@ -20,23 +20,65 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # ──────────────── Configuration ────────────────
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/sam3_output"
-
-PROMPTS=("blue table" "robotic arm(s)" "tools" "trash can")
+BASE_DIR="/localhome/local-vennw/code/task4-2_20260226_trimmed/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task4-2_20260226_trimmed/sam3_output"
 
 HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
+LEFT_ARM_CAMERA="observation.images.left_arm_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
+# ── Per-camera configuration ──
+# Camera list to process (comment/uncomment to toggle)
 CAMERAS=(
     "$HEAD_RIGHT_CAMERA"
+    "$LEFT_ARM_CAMERA"
     "$RIGHT_ARM_CAMERA"
 )
 
-GPU_IDS="0 1 2 3"
+GPU_IDS="1 2 3 5 6 7"
 
-# Per-episode point clicks JSON (set to "" to disable)
-POINT_CLICKS_JSON="/localhome/local-vennw/code/task4-1_020202050212_merged/point_clicks.json"
+# Returns the prompt list for a given camera (via global REPLY_PROMPTS array)
+get_camera_prompts() {
+  local cam="$1"
+  case "$cam" in
+    "$RIGHT_ARM_CAMERA")
+      REPLY_PROMPTS=("blue table" "metal items" "red item" "robotic arm(s)" "blue item")
+      ;;
+    "$LEFT_ARM_CAMERA")
+      REPLY_PROMPTS=("blue table" "metal items" "robotic arm(s)" "tools")
+      ;;
+    "$HEAD_RIGHT_CAMERA")
+      REPLY_PROMPTS=("blue table" "metal items" "red item" "robot" "blue item")
+      ;;
+    *)
+      REPLY_PROMPTS=("blue table" "metal items" "robotic arm(s)")
+      ;;
+  esac
+}
+
+# Returns the point-clicks JSON path for a given camera (empty = disabled)
+get_camera_point_clicks() {
+  local cam="$1"
+  case "$cam" in
+    "$RIGHT_ARM_CAMERA")
+      echo "${SCRIPT_DIR}/point_clicks_right_arm.json"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+# Returns extra per-camera postprocess flags (via global REPLY_PP_EXTRA array)
+get_camera_pp_extra() {
+  local cam="$1"
+  REPLY_PP_EXTRA=()
+  case "$cam" in
+    "$RIGHT_ARM_CAMERA")
+      REPLY_PP_EXTRA=(--pp_leftmost_rect --pp_leftmost_rect_fill 6)
+      ;;
+  esac
+}
 
 # Postprocess settings
 PP_NUM_WORKERS=96
@@ -76,17 +118,9 @@ while [[ $# -gt 0 ]]; do
       GPU_IDS="$2"
       shift 2
       ;;
-    --point-clicks)
-      POINT_CLICKS_JSON="$2"
-      shift 2
-      ;;
-    --no-point-clicks)
-      POINT_CLICKS_JSON=""
-      shift
-      ;;
     *)
       echo "Unknown argument: $1"
-      echo "Usage: $0 --episodes 5,10,15  OR  $0 --random 5 [--seed 42] [--gpus '0 1'] [--point-clicks path.json] [--no-point-clicks]"
+      echo "Usage: $0 --episodes 5,10,15  OR  $0 --random 5 [--seed 42] [--gpus '0 1']"
       exit 1
       ;;
   esac
@@ -116,33 +150,45 @@ if [ "$PP_UNION_GAP_FILL" = true ]; then
   PP_FLAGS+=(--pp_union_gap_fill --pp_union_gap_closing_iterations "$PP_UNION_GAP_CLOSING_ITERATIONS")
 fi
 
-POINT_CLICKS_FLAG=()
-if [ -n "$POINT_CLICKS_JSON" ] && [ -f "$POINT_CLICKS_JSON" ]; then
-  POINT_CLICKS_FLAG=(--point_clicks_json "$POINT_CLICKS_JSON")
-  echo "Point clicks: $POINT_CLICKS_JSON"
-fi
+# Per-camera point-clicks and extra PP flags are resolved in the run loop below.
 
 # ──────────────── Mode: random N ────────────────
 if [ "$MODE" = "random" ]; then
   echo "🚀 Running segmentation on ${NUM_RANDOM} random episodes (seed=${SEED})"
   echo "--------------------------------------------------------------------"
+  echo "Cameras: ${CAMERAS[*]}"
   echo "GPUs: ${GPU_IDS}"
   echo "--------------------------------------------------------------------"
 
-  python "${SAM3_DIR}/batch_run_parallel.py" \
-    --base_dir "$BASE_DIR" \
-    --checkpoint "$CHECKPOINT" \
-    --output_dir "$BASE_OUTPUT_DIR" \
-    --cameras "${CAMERAS[@]}" \
-    --prompts "${PROMPTS[@]}" \
-    --save_npz \
-    --no_pkl \
-    --postprocess \
-    "${PP_FLAGS[@]}" \
-    --debug_n "$NUM_RANDOM" \
-    --debug_seed "$SEED" \
-    "${POINT_CLICKS_FLAG[@]}" \
-    --gpu_ids $GPU_IDS
+  for cam in "${CAMERAS[@]}"; do
+    get_camera_prompts "$cam"
+    local_point_clicks=$(get_camera_point_clicks "$cam")
+    get_camera_pp_extra "$cam"
+
+    CAM_FLAGS=()
+    if [ -n "$local_point_clicks" ] && [ -f "$local_point_clicks" ]; then
+      CAM_FLAGS+=(--point_clicks_json "$local_point_clicks")
+      echo "  [$cam] Point clicks: $local_point_clicks"
+    fi
+
+    echo "  [$cam] Prompts: ${REPLY_PROMPTS[*]}"
+
+    python "${SAM3_DIR}/batch_run_parallel.py" \
+      --base_dir "$BASE_DIR" \
+      --checkpoint "$CHECKPOINT" \
+      --output_dir "$BASE_OUTPUT_DIR" \
+      --cameras "$cam" \
+      --prompts "${REPLY_PROMPTS[@]}" \
+      --save_npz \
+      --no_pkl \
+      --postprocess \
+      "${PP_FLAGS[@]}" \
+      "${REPLY_PP_EXTRA[@]}" \
+      --debug_n "$NUM_RANDOM" \
+      --debug_seed "$SEED" \
+      "${CAM_FLAGS[@]}" \
+      --gpu_ids $GPU_IDS
+  done
 
   echo "🎉 Done (random ${NUM_RANDOM} episodes)!"
   exit 0
@@ -183,17 +229,32 @@ if [ "$TOTAL" -eq 0 ]; then
 fi
 echo "Found ${TOTAL} video files to process."
 
-python "${SAM3_DIR}/batch_run_parallel.py" \
-  --base_dir "$TMPDIR" \
-  --checkpoint "$CHECKPOINT" \
-  --output_dir "$BASE_OUTPUT_DIR" \
-  --cameras "${CAMERAS[@]}" \
-  --prompts "${PROMPTS[@]}" \
-  --save_npz \
-  --no_pkl \
-  --postprocess \
-  "${PP_FLAGS[@]}" \
-  "${POINT_CLICKS_FLAG[@]}" \
-  --gpu_ids $GPU_IDS
+for cam in "${CAMERAS[@]}"; do
+  get_camera_prompts "$cam"
+  local_point_clicks=$(get_camera_point_clicks "$cam")
+  get_camera_pp_extra "$cam"
+
+  CAM_FLAGS=()
+  if [ -n "$local_point_clicks" ] && [ -f "$local_point_clicks" ]; then
+    CAM_FLAGS+=(--point_clicks_json "$local_point_clicks")
+    echo "  [$cam] Point clicks: $local_point_clicks"
+  fi
+
+  echo "  [$cam] Prompts: ${REPLY_PROMPTS[*]}"
+
+  python "${SAM3_DIR}/batch_run_parallel.py" \
+    --base_dir "$TMPDIR" \
+    --checkpoint "$CHECKPOINT" \
+    --output_dir "$BASE_OUTPUT_DIR" \
+    --cameras "$cam" \
+    --prompts "${REPLY_PROMPTS[@]}" \
+    --save_npz \
+    --no_pkl \
+    --postprocess \
+    "${PP_FLAGS[@]}" \
+    "${REPLY_PP_EXTRA[@]}" \
+    "${CAM_FLAGS[@]}" \
+    --gpu_ids $GPU_IDS
+done
 
 echo "🎉 Done (episodes: ${EPISODES_CSV})!"

@@ -65,6 +65,48 @@ def parse_labels_by_frame(labels_by_frame_str):
     return labels_by_frame
 
 
+def parse_assist_points(assist_points_str):
+    """Parse assist points: 'prompt_idx:frame_idx:x1,y1;x2,y2[:direction]|...'
+    Returns {prompt_idx: {frame_idx: {"points": [(x,y),...], "direction": str|None}}}
+    """
+    if not assist_points_str:
+        return {}
+    result = {}
+    for entry in assist_points_str.split("|"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split(":")
+        prompt_idx = int(parts[0])
+        frame_idx = int(parts[1])
+        points_str = parts[2]
+        direction = parts[3] if len(parts) > 3 else None
+        points = parse_points(points_str)
+        result.setdefault(prompt_idx, {})[frame_idx] = {
+            "points": points,
+            "direction": direction,
+        }
+    return result
+
+
+def parse_prompt_extra_frames(s):
+    """Parse 'prompt_idx:frame_idx|...' → {prompt_idx: [frame_idx, ...]}
+    frame_idx=-1 means last frame (resolved at runtime).
+    """
+    if not s:
+        return {}
+    result = {}
+    for entry in s.split("|"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        prompt_str, frame_str = entry.split(":")
+        prompt_idx = int(prompt_str)
+        frame_idx = int(frame_str)
+        result.setdefault(prompt_idx, []).append(frame_idx)
+    return result
+
+
 def outputs_to_npz(outputs, output_path, merge_objects, default_hw):
     frame_indices = sorted(outputs.keys())
     if not frame_indices:
@@ -369,6 +411,22 @@ def parse_args():
              "If not set, points become an extra category after all prompts.",
     )
     parser.add_argument(
+        "--assist_points",
+        type=str,
+        default="",
+        help="Points that assist text prompts (added in the same SAM3 session). "
+             'Format: "prompt_idx:frame_idx:x1,y1;x2,y2|..." '
+             "e.g. '0:0:35.5,224.2|3:0:100,200;150,250'",
+    )
+    parser.add_argument(
+        "--prompt_extra_frames",
+        type=str,
+        default="",
+        help="Re-add text prompt on extra frames for bidirectional propagation. "
+             'Format: "prompt_idx:frame_idx|..." e.g. "2:-1" (-1 = last frame). '
+             "Useful for objects that appear later in the video.",
+    )
+    parser.add_argument(
         "--max_frames",
         type=int,
         default=None,
@@ -436,15 +494,23 @@ def parse_args():
     parser.add_argument("--pp_topright_rect_y_max", type=int, default=420)
     parser.add_argument("--pp_topright_rect_y_threshold", type=int, default=200)
     parser.add_argument("--pp_topright_rect_frame_start_ratio", type=float, default=0.667)
+    parser.add_argument("--pp_leftmost_rect", action="store_true",
+                        help="Fill bg below-left of the leftmost label-1 pixel. "
+                             "First half: always. Second half: only if skip_label absent.")
+    parser.add_argument("--pp_leftmost_rect_label", type=int, default=1)
+    parser.add_argument("--pp_leftmost_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_leftmost_rect_y_max", type=int, default=420)
+    parser.add_argument("--pp_leftmost_rect_skip_label", type=int, default=3)
     return parser.parse_args()
 
-def propagate_in_video(predictor, session_id, max_frames=None):
+def propagate_in_video(predictor, session_id, max_frames=None, direction="both"):
     outputs_per_frame = {}
     for response in predictor.handle_stream_request(
         request=dict(
             type="propagate_in_video",
             session_id=session_id,
             max_frame_num_to_track=max_frames,
+            propagation_direction=direction,
         )
     ):
         outputs_per_frame[response["frame_index"]] = response["outputs"]
@@ -520,6 +586,11 @@ def _run_postprocess_only(args):
         topright_rect_y_max=args.pp_topright_rect_y_max,
         topright_rect_y_threshold=args.pp_topright_rect_y_threshold,
         topright_rect_frame_start_ratio=args.pp_topright_rect_frame_start_ratio,
+        leftmost_rect_enabled=args.pp_leftmost_rect,
+        leftmost_rect_label=args.pp_leftmost_rect_label,
+        leftmost_rect_fill=args.pp_leftmost_rect_fill,
+        leftmost_rect_y_max=args.pp_leftmost_rect_y_max,
+        leftmost_rect_skip_label=args.pp_leftmost_rect_skip_label,
     )
 
     np.savez_compressed(post_npz_path, arr_0=processed)
@@ -658,7 +729,14 @@ def main():
     static_prompt_frame0 = {}
     static_prompt_merged_frames = {}
 
+    assist_points_map = parse_assist_points(args.assist_points)
+    extra_frames_map = parse_prompt_extra_frames(args.prompt_extra_frames)
+
     print(f"Start processing {len(prompts_list)} prompts: {prompts_list}")
+    if assist_points_map:
+        print(f"Assist points for prompt indices: {sorted(assist_points_map.keys())}")
+    if extra_frames_map:
+        print(f"Extra prompt frames: {extra_frames_map}")
     if static_prompts_set:
         print(f"Static prompts (frame-0 only, replicate to all frames): {static_prompts_set}")
 
@@ -671,17 +749,119 @@ def main():
             request=dict(type="reset_session", session_id=session_id)
         )
 
-        # Add prompt
-        _ = video_predictor.handle_request(
-            request=dict(
-                type="add_prompt",
-                session_id=session_id,
-                frame_index=0,
-                text=p,
-            )
-        )
+        # Check if any assist entry specifies backward-only direction
+        assist_direction = None
+        if prompt_idx in assist_points_map:
+            for _, a_entry in assist_points_map[prompt_idx].items():
+                if a_entry.get("direction"):
+                    assist_direction = a_entry["direction"]
 
-        # Propagate (static prompts only need frame 0)
+        # Collect frames to add text prompt on
+        prompt_frames = []
+        if assist_direction != "backward":
+            prompt_frames.append(0)
+        if prompt_idx in extra_frames_map:
+            for f in extra_frames_map[prompt_idx]:
+                resolved = f if f >= 0 else total_video_frames + f
+                if resolved not in prompt_frames:
+                    prompt_frames.append(resolved)
+
+        # Add text prompt on each frame
+        for pf in prompt_frames:
+            _ = video_predictor.handle_request(
+                request=dict(
+                    type="add_prompt",
+                    session_id=session_id,
+                    frame_index=pf,
+                    text=p,
+                )
+            )
+        if prompt_frames:
+            print(f"  Text prompt on frames: {prompt_frames}")
+
+        # Assist points require: full propagation first (text only), then add points
+        # and propagate again (partial, lightweight — reuses cached VG predictions).
+        prompt_direction = assist_direction or "both"
+        has_assist = prompt_idx in assist_points_map
+
+        if has_assist and prompt_frames:
+            # Step 1: full propagation with text prompt only (populates cache)
+            print(f"  Running initial propagation (text only) to populate cache...")
+            propagate_in_video(
+                video_predictor, session_id, max_frames=args.max_frames,
+                direction=prompt_direction
+            )
+            # Step 2: add assist point clicks (triggers partial propagation next)
+            for a_frame_idx, a_entry in assist_points_map[prompt_idx].items():
+                a_points = a_entry["points"]
+                if a_frame_idx < 0:
+                    a_frame_idx = total_video_frames + a_frame_idx
+                rel_pts = [[x / W, y / H] for x, y in a_points]
+                pts_tensor = torch.tensor(rel_pts, dtype=torch.float32)
+                labels_tensor = torch.tensor([1] * len(a_points), dtype=torch.int32)
+                _ = video_predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=session_id,
+                        frame_index=a_frame_idx,
+                        points=pts_tensor,
+                        point_labels=labels_tensor,
+                        obj_id=900 + prompt_idx,
+                    )
+                )
+                print(f"  + Assist points on frame {a_frame_idx}: {len(a_points)} point(s)")
+            # Step 3: partial propagation (merges point refinement with cached VG)
+            print(f"  Running refinement propagation (partial)...")
+
+        if has_assist and not prompt_frames:
+            # backward-only: add text prompt on assist frame, propagate to fill
+            # cache, then add point refinement.
+            # Step 1: find the assist frame and add text prompt there
+            assist_frame_for_text = None
+            for a_frame_idx_raw, a_entry in assist_points_map[prompt_idx].items():
+                resolved = a_frame_idx_raw if a_frame_idx_raw >= 0 else total_video_frames + a_frame_idx_raw
+                assist_frame_for_text = resolved
+                break
+            if assist_frame_for_text is not None:
+                _ = video_predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=session_id,
+                        frame_index=assist_frame_for_text,
+                        text=p,
+                    )
+                )
+                print(f"  Text prompt on frame {assist_frame_for_text} (backward anchor)")
+                # Step 2: full backward propagation to populate cache
+                print(f"  Running initial propagation (text only, {prompt_direction}) to populate cache...")
+                propagate_in_video(
+                    video_predictor, session_id, max_frames=args.max_frames,
+                    direction=prompt_direction
+                )
+            # Step 3: add assist point clicks (now cache exists)
+            for a_frame_idx, a_entry in assist_points_map[prompt_idx].items():
+                a_points = a_entry["points"]
+                if a_frame_idx < 0:
+                    a_frame_idx = total_video_frames + a_frame_idx
+                rel_pts = [[x / W, y / H] for x, y in a_points]
+                pts_tensor = torch.tensor(rel_pts, dtype=torch.float32)
+                labels_tensor = torch.tensor([1] * len(a_points), dtype=torch.int32)
+                _ = video_predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=session_id,
+                        frame_index=a_frame_idx,
+                        points=pts_tensor,
+                        point_labels=labels_tensor,
+                        obj_id=900 + prompt_idx,
+                    )
+                )
+                print(f"  + Assist points on frame {a_frame_idx}: {len(a_points)} point(s)"
+                      f" [direction={prompt_direction}]")
+            # Step 4: partial refinement propagation
+            print(f"  Running refinement propagation (partial)...")
+
+        # Final propagation
         if is_static:
             outputs_per_frame = propagate_in_video(
                 video_predictor, session_id, max_frames=1
@@ -692,7 +872,8 @@ def main():
                 static_prompt_merged_frames[prompt_idx] = set(outputs_per_frame.keys())
         else:
             outputs_per_frame = propagate_in_video(
-                video_predictor, session_id, max_frames=args.max_frames
+                video_predictor, session_id, max_frames=args.max_frames,
+                direction=prompt_direction
             )
         
         # Merge this prompt's results (for static prompts, only the propagated frames)
@@ -980,6 +1161,11 @@ def main():
             topright_rect_y_max=args.pp_topright_rect_y_max,
             topright_rect_y_threshold=args.pp_topright_rect_y_threshold,
             topright_rect_frame_start_ratio=args.pp_topright_rect_frame_start_ratio,
+            leftmost_rect_enabled=args.pp_leftmost_rect,
+            leftmost_rect_label=args.pp_leftmost_rect_label,
+            leftmost_rect_fill=args.pp_leftmost_rect_fill,
+            leftmost_rect_y_max=args.pp_leftmost_rect_y_max,
+            leftmost_rect_skip_label=args.pp_leftmost_rect_skip_label,
         )
         vis_outputs = label_masks_to_outputs(processed, frame_indices)
 

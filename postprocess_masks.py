@@ -447,6 +447,83 @@ def fill_bg_topright_rect(mask, source_label, fill_value, y_max, y_threshold=200
     return result
 
 
+def fill_bg_leftmost_corner_rect(mask, source_label, fill_value, y_max, skip_label=None):
+    """
+    Find the leftmost pixel of source_label (min x, then min y among those).
+    Fill background (0) in the rectangle [0:x, y:y_max] with fill_value.
+    If skip_label is set and present in the frame, skip entirely.
+    """
+    if skip_label is not None and np.any(mask == skip_label):
+        return mask
+    coords = np.argwhere(mask == source_label)
+    if coords.size == 0:
+        return mask
+    ys = coords[:, 0]
+    xs = coords[:, 1]
+    min_x = int(xs.min())
+    min_y = int(ys[xs == min_x].min())
+    h = mask.shape[0]
+    y_end = min(y_max + 1, h)
+    if min_y >= y_end or min_x <= 0:
+        return mask
+    result = mask.copy()
+    roi = result[min_y:y_end, 0:min_x]
+    roi[roi == 0] = fill_value
+    return result
+
+
+def fill_bg_corner_rect(mask, source_label, fill_value, y_max, mode="topright", x_first=False):
+    """
+    Find the top corner point of source_label and fill background in a rectangle.
+
+    mode="topright": fill [y:y_max, 0:x+1]
+    mode="topleft":  fill [y:y_max, x:W]
+
+    x_first=False (default): min y first, then extremal x among that row.
+    x_first=True:  extremal x first, then min y among that column.
+    """
+    coords = np.argwhere(mask == source_label)
+    if coords.size == 0:
+        return mask
+    ys = coords[:, 0]
+    xs = coords[:, 1]
+
+    if mode == "topright":
+        if x_first:
+            anchor_x = int(xs.max())
+            anchor_y = int(ys[xs == anchor_x].min())
+        else:
+            anchor_y = int(ys.min())
+            anchor_x = int(xs[ys == anchor_y].max())
+    elif mode == "topleft":
+        if x_first:
+            anchor_x = int(xs.min())
+            anchor_y = int(ys[xs == anchor_x].min())
+        else:
+            anchor_y = int(ys.min())
+            anchor_x = int(xs[ys == anchor_y].min())
+    else:
+        raise ValueError(f"Unknown corner_rect mode: {mode}")
+
+    h, w = mask.shape
+    y_end = min(y_max + 1, h)
+    if anchor_y >= y_end:
+        return mask
+
+    result = mask.copy()
+    if mode == "topright":
+        if anchor_x <= 0:
+            return mask
+        roi = result[anchor_y:y_end, 0:anchor_x + 1]
+    else:
+        if anchor_x >= w - 1:
+            return mask
+        roi = result[anchor_y:y_end, anchor_x:w]
+
+    roi[roi == 0] = fill_value
+    return result
+
+
 def postprocess_video_masks(masks, 
                             num_classes=4,
                             fill_holes=True,
@@ -493,7 +570,22 @@ def postprocess_video_masks(masks,
                             topright_rect_fill=5,
                             topright_rect_y_max=420,
                             topright_rect_y_threshold=200,
-                            topright_rect_frame_start_ratio=0.667):
+                            topright_rect_frame_start_ratio=0.667,
+                            leftmost_rect_enabled=False,
+                            leftmost_rect_label=1,
+                            leftmost_rect_fill=5,
+                            leftmost_rect_y_max=420,
+                            leftmost_rect_skip_label=3,
+                            corner_rect_enabled=False,
+                            corner_rect_mode="topright",
+                            corner_rect_labels=None,
+                            corner_rect_fill=4,
+                            corner_rect_y_max=420,
+                            corner_rect_x_first_labels=None,
+                            temporal_fill_enabled=False,
+                            temporal_fill_labels=None,
+                            temporal_fill_union_labels=None,
+                            temporal_fill_value=5):
     """
     Postprocess masks for all frames in a video.
     
@@ -654,8 +746,53 @@ def postprocess_video_masks(masks,
                 topright_rect_y_max, topright_rect_y_threshold
             )
 
+        # Fill bg below-left of leftmost label pixel.
+        # First half: always apply. Second half: only if skip_label absent.
+        if leftmost_rect_enabled:
+            in_first_half = t < T // 2
+            skip = None if in_first_half else leftmost_rect_skip_label
+            processed_frame = fill_bg_leftmost_corner_rect(
+                processed_frame, leftmost_rect_label, leftmost_rect_fill,
+                leftmost_rect_y_max, skip_label=skip
+            )
+
+        if corner_rect_enabled and corner_rect_labels:
+            for lbl in corner_rect_labels:
+                use_x_first = corner_rect_x_first_labels and lbl in corner_rect_x_first_labels
+                processed_frame = fill_bg_corner_rect(
+                    processed_frame, lbl, corner_rect_fill,
+                    corner_rect_y_max, corner_rect_mode, x_first=use_x_first
+                )
+
         result[t] = processed_frame
-    
+
+    if temporal_fill_enabled:
+        all_relevant = list(set(
+            (temporal_fill_labels or []) +
+            (temporal_fill_union_labels or []) +
+            [temporal_fill_value]
+        ))
+        first_has = np.isin(result[0], all_relevant)
+        last_has = np.isin(result[T - 1], all_relevant)
+        skip_mask = ~first_has & ~last_has
+
+        if temporal_fill_union_labels:
+            union_mask = np.zeros((result.shape[1], result.shape[2]), dtype=bool)
+            for t in range(T):
+                union_mask |= np.isin(result[t], temporal_fill_union_labels)
+            union_mask &= ~skip_mask
+            for t in range(T):
+                result[t][(result[t] == 0) & union_mask] = temporal_fill_value
+
+        if temporal_fill_labels:
+            propagate_labels = list(set(temporal_fill_labels) | {temporal_fill_value})
+            for t in range(T - 1):
+                source_mask = np.isin(result[t], propagate_labels) & ~skip_mask
+                result[t + 1][(result[t + 1] == 0) & source_mask] = temporal_fill_value
+            for t in range(T - 1, 0, -1):
+                source_mask = np.isin(result[t], propagate_labels) & ~skip_mask
+                result[t - 1][(result[t - 1] == 0) & source_mask] = temporal_fill_value
+
     return result
 
 
@@ -678,7 +815,13 @@ def _process_single_file(args_tuple):
      topleft_rect_enabled, topleft_rect_label, topleft_rect_fill,
      topleft_rect_y_max, topleft_rect_frame_start, topleft_rect_frame_end_ratio,
      topright_rect_enabled, topright_rect_label, topright_rect_fill,
-     topright_rect_y_max, topright_rect_y_threshold, topright_rect_frame_start_ratio) = args_tuple
+     topright_rect_y_max, topright_rect_y_threshold, topright_rect_frame_start_ratio,
+     leftmost_rect_enabled, leftmost_rect_label, leftmost_rect_fill,
+     leftmost_rect_y_max, leftmost_rect_skip_label,
+     corner_rect_enabled, corner_rect_mode, corner_rect_labels,
+     corner_rect_fill, corner_rect_y_max, corner_rect_x_first_labels,
+     temporal_fill_enabled, temporal_fill_labels, temporal_fill_union_labels,
+     temporal_fill_value) = args_tuple
 
     mask_file = Path(mask_file)
     out_path = mask_file.parent / mask_file.name.replace("_masks.npz", "_masks_post.npz")
@@ -737,6 +880,21 @@ def _process_single_file(args_tuple):
         topright_rect_y_max=topright_rect_y_max,
         topright_rect_y_threshold=topright_rect_y_threshold,
         topright_rect_frame_start_ratio=topright_rect_frame_start_ratio,
+        leftmost_rect_enabled=leftmost_rect_enabled,
+        leftmost_rect_label=leftmost_rect_label,
+        leftmost_rect_fill=leftmost_rect_fill,
+        leftmost_rect_y_max=leftmost_rect_y_max,
+        leftmost_rect_skip_label=leftmost_rect_skip_label,
+        corner_rect_enabled=corner_rect_enabled,
+        corner_rect_mode=corner_rect_mode,
+        corner_rect_labels=corner_rect_labels,
+        corner_rect_fill=corner_rect_fill,
+        corner_rect_y_max=corner_rect_y_max,
+        corner_rect_x_first_labels=corner_rect_x_first_labels,
+        temporal_fill_enabled=temporal_fill_enabled,
+        temporal_fill_labels=temporal_fill_labels,
+        temporal_fill_union_labels=temporal_fill_union_labels,
+        temporal_fill_value=temporal_fill_value,
     )
 
     # Save
@@ -785,7 +943,22 @@ def process_directory(input_dir: Path,
                       topright_rect_fill=5,
                       topright_rect_y_max=420,
                       topright_rect_y_threshold=200,
-                      topright_rect_frame_start_ratio=0.667):
+                      topright_rect_frame_start_ratio=0.667,
+                      leftmost_rect_enabled=False,
+                      leftmost_rect_label=1,
+                      leftmost_rect_fill=5,
+                      leftmost_rect_y_max=420,
+                      leftmost_rect_skip_label=3,
+                      corner_rect_enabled=False,
+                      corner_rect_mode="topright",
+                      corner_rect_labels=None,
+                      corner_rect_fill=4,
+                      corner_rect_y_max=420,
+                      corner_rect_x_first_labels=None,
+                      temporal_fill_enabled=False,
+                      temporal_fill_labels=None,
+                      temporal_fill_union_labels=None,
+                      temporal_fill_value=5):
     """
     Process all *_masks.npz files in a directory.
     Output: *_masks_post.npz
@@ -824,7 +997,13 @@ def process_directory(input_dir: Path,
          topleft_rect_enabled, topleft_rect_label, topleft_rect_fill,
          topleft_rect_y_max, topleft_rect_frame_start, topleft_rect_frame_end_ratio,
          topright_rect_enabled, topright_rect_label, topright_rect_fill,
-         topright_rect_y_max, topright_rect_y_threshold, topright_rect_frame_start_ratio)
+         topright_rect_y_max, topright_rect_y_threshold, topright_rect_frame_start_ratio,
+         leftmost_rect_enabled, leftmost_rect_label, leftmost_rect_fill,
+         leftmost_rect_y_max, leftmost_rect_skip_label,
+         corner_rect_enabled, corner_rect_mode, corner_rect_labels,
+         corner_rect_fill, corner_rect_y_max, corner_rect_x_first_labels,
+         temporal_fill_enabled, temporal_fill_labels, temporal_fill_union_labels,
+         temporal_fill_value)
         for mask_file in mask_files
     ]
 
@@ -1038,6 +1217,28 @@ def main():
                         help='Only consider label pixels with y < this (default: 200).')
     parser.add_argument('--topright_rect_frame_start_ratio', type=float, default=0.667,
                         help='Start ratio of video (default: 0.667 = last 1/3).')
+    parser.add_argument('--corner_rect', action='store_true',
+                        help='Fill bg rect from top-corner of label(s). '
+                             'topright: fill left-below; topleft: fill right-below.')
+    parser.add_argument('--corner_rect_mode', type=str, default="topright",
+                        help='Corner mode: "topright" or "topleft" (default: topright).')
+    parser.add_argument('--corner_rect_labels', type=str, default=None,
+                        help='Comma-separated source labels, e.g. "1,3".')
+    parser.add_argument('--corner_rect_fill', type=int, default=4,
+                        help='Fill value for corner rect (default: 4).')
+    parser.add_argument('--corner_rect_y_max', type=int, default=420,
+                        help='Bottom boundary of fill rect (default: 420).')
+    parser.add_argument('--corner_rect_x_first_labels', type=str, default=None,
+                        help='Comma-separated labels that use x-first anchor (extremal x, then min y). '
+                             'Other labels use y-first (min y, then extremal x). E.g. "3".')
+    parser.add_argument('--temporal_fill', action='store_true',
+                        help='Forward temporal fill: if pixel has source label in frame N and is 0 in frame N+1, fill with target.')
+    parser.add_argument('--temporal_fill_labels', type=str, default=None,
+                        help='Comma-separated labels for forward/backward propagation, e.g. "1,5".')
+    parser.add_argument('--temporal_fill_union_labels', type=str, default=None,
+                        help='Comma-separated labels for union fill (fill all frames where pixel ever had label), e.g. "3,4".')
+    parser.add_argument('--temporal_fill_value', type=int, default=5,
+                        help='Fill value for temporal fill (default: 5).')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing *_masks_post.npz files')
     parser.add_argument('--copy_to_dataset_root', type=str, default=None,
@@ -1155,6 +1356,16 @@ def main():
                 topright_rect_y_max=args.topright_rect_y_max,
                 topright_rect_y_threshold=args.topright_rect_y_threshold,
                 topright_rect_frame_start_ratio=args.topright_rect_frame_start_ratio,
+                corner_rect_enabled=args.corner_rect,
+                corner_rect_mode=args.corner_rect_mode,
+                corner_rect_labels=[int(x) for x in args.corner_rect_labels.split(",")] if args.corner_rect_labels else None,
+                corner_rect_fill=args.corner_rect_fill,
+                corner_rect_y_max=args.corner_rect_y_max,
+                corner_rect_x_first_labels=[int(x) for x in args.corner_rect_x_first_labels.split(",")] if args.corner_rect_x_first_labels else None,
+                temporal_fill_enabled=args.temporal_fill,
+                temporal_fill_labels=[int(x) for x in args.temporal_fill_labels.split(",")] if args.temporal_fill_labels else None,
+                temporal_fill_union_labels=[int(x) for x in args.temporal_fill_union_labels.split(",")] if args.temporal_fill_union_labels else None,
+                temporal_fill_value=args.temporal_fill_value,
             )
 
         print("\nAll done!")

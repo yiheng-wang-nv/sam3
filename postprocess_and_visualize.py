@@ -97,6 +97,26 @@ def main():
     parser.add_argument("--fill_bg_roi", type=str, action="append", default=None,
                         help='Fill background in ROI. Format: "frame_start,frame_end_ratio,y_min,y_max,x_min,x_max,target". '
                              'Use -1 for full range. Can be specified multiple times.')
+    parser.add_argument("--corner_rect", action="store_true",
+                        help="Fill bg rect from top-corner of label(s).")
+    parser.add_argument("--corner_rect_mode", type=str, default="topright",
+                        help='Corner mode: "topright" or "topleft".')
+    parser.add_argument("--corner_rect_labels", type=str, default=None,
+                        help='Comma-separated source labels, e.g. "1,3".')
+    parser.add_argument("--corner_rect_fill", type=int, default=4,
+                        help="Fill value for corner rect.")
+    parser.add_argument("--corner_rect_y_max", type=int, default=420,
+                        help="Bottom boundary of fill rect.")
+    parser.add_argument("--corner_rect_x_first_labels", type=str, default=None,
+                        help='Comma-separated labels using x-first anchor, e.g. "3".')
+    parser.add_argument("--temporal_fill", action="store_true",
+                        help="Forward temporal fill.")
+    parser.add_argument("--temporal_fill_labels", type=str, default=None,
+                        help='Comma-separated labels for forward/backward propagation, e.g. "1,5".')
+    parser.add_argument("--temporal_fill_union_labels", type=str, default=None,
+                        help='Comma-separated labels for union fill, e.g. "3,4".')
+    parser.add_argument("--temporal_fill_value", type=int, default=5,
+                        help="Fill value for temporal fill (default: 5).")
 
     args = parser.parse_args()
 
@@ -140,6 +160,16 @@ def main():
         blue_table_skip_if_label_above=args.blue_table_skip_if_label_above,
         blue_table_skip_if_label_area_gt=args.blue_table_skip_if_label_area_gt,
         fill_bg_roi_list=fill_bg_roi_list,
+        corner_rect_enabled=args.corner_rect,
+        corner_rect_mode=args.corner_rect_mode,
+        corner_rect_labels=[int(x) for x in args.corner_rect_labels.split(",")] if args.corner_rect_labels else None,
+        corner_rect_fill=args.corner_rect_fill,
+        corner_rect_y_max=args.corner_rect_y_max,
+        corner_rect_x_first_labels=[int(x) for x in args.corner_rect_x_first_labels.split(",")] if args.corner_rect_x_first_labels else None,
+        temporal_fill_enabled=args.temporal_fill,
+        temporal_fill_labels=[int(x) for x in args.temporal_fill_labels.split(",")] if args.temporal_fill_labels else None,
+        temporal_fill_union_labels=[int(x) for x in args.temporal_fill_union_labels.split(",")] if args.temporal_fill_union_labels else None,
+        temporal_fill_value=args.temporal_fill_value,
     )
 
     outputs = label_masks_to_outputs(processed)

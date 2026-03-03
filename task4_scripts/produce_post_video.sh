@@ -5,22 +5,23 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
-BASE_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/videos/chunk-000"
-SAM3_OUTPUT="/localhome/local-vennw/code/task4-1_020202050212_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task4-1_02260227_merged/videos/chunk-000"
+SAM3_OUTPUT="/localhome/local-vennw/code/task4-1_02260227_merged/sam3_output"
 
 # All 4 cameras
 CAMERAS=(
     "observation.images.head_right_camera_color_optical_frame"
+    "observation.images.left_arm_camera_color_optical_frame"
     "observation.images.right_arm_camera_color_optical_frame"
 )
 
-OUTPUT_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/comparison_videos"
+OUTPUT_DIR="/localhome/local-vennw/code/task4-1_02260227_merged/comparison_videos"
 
-NUM_SAMPLES=2
+NUM_SAMPLES=10
 N_PARALLEL=10
 SEED=42
-MIN_EPISODE=1  # Only select episodes with index > this value
-MAX_EPISODE=199  # Only select episodes with index < this value
+MIN_EPISODE=0  # Only select episodes with index > this value
+MAX_EPISODE=300  # Only select episodes with index < this value
 
 mkdir -p "$OUTPUT_DIR"
 

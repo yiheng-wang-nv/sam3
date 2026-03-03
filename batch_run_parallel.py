@@ -100,6 +100,7 @@ def run_worker(
     pp_fill_interior_target=4,
     pp_per_camera=None,
     skip_if_exists=False,
+    skip_if_masks_dir=None,
     static_prompts=None,
     pp_topleft_rect=False,
     pp_topleft_rect_label=1,
@@ -113,7 +114,13 @@ def run_worker(
     pp_topright_rect_y_max=420,
     pp_topright_rect_y_threshold=200,
     pp_topright_rect_frame_start_ratio=0.667,
+    pp_leftmost_rect=False,
+    pp_leftmost_rect_label=1,
+    pp_leftmost_rect_fill=5,
+    pp_leftmost_rect_y_max=420,
+    pp_leftmost_rect_skip_label=3,
     point_clicks=None,
+    prompt_extra_frames_str="",
 ):
     """Worker function for GPU-based segmentation inference (PKL only, no video)"""
     
@@ -146,6 +153,11 @@ def run_worker(
             if os.path.exists(expected_output) or os.path.exists(expected_post_output):
                 print(f"[Worker GPU {gpu_id}] Skipping {video_path} (Output exists: {expected_output} or {expected_post_output})")
                 continue
+            if skip_if_masks_dir and camera_name:
+                masks_path = os.path.join(skip_if_masks_dir, "chunk-000", camera_name, f"{video_name}_masks.npz")
+                if os.path.exists(masks_path):
+                    print(f"[Worker GPU {gpu_id}] Skipping {video_path} (Masks exist: {masks_path})")
+                    continue
 
         print(f"[Worker GPU {gpu_id}] Processing: {video_path} -> {output_dir}")
         
@@ -159,12 +171,28 @@ def run_worker(
         ] + prompts
 
         # Per-episode point clicks override global points
+        # Supports "_default" key as fallback for all episodes in a camera
+        # Format: list of {assist_prompt_idx, frame_idx, points} → --assist_points
+        #     or: dict {frame_idx: {points, labels}}              → --points_by_frame (legacy)
         ep_clicks = None
         if point_clicks and camera_name:
-            ep_clicks = point_clicks.get(camera_name, {}).get(video_name, {})
+            cam_clicks = point_clicks.get(camera_name, {})
+            ep_clicks = cam_clicks.get(video_name, cam_clicks.get("_default", None))
 
         ep_prompt_idx = points_prompt_idx
-        if ep_clicks:
+        if isinstance(ep_clicks, list):
+            # Assist mode: points are injected into text prompt sessions
+            assist_parts = []
+            for entry in ep_clicks:
+                pidx = entry["assist_prompt_idx"]
+                fidx = entry.get("frame_idx", 0)
+                pts = entry["points"]
+                d = entry.get("direction", "")
+                assist_parts.append(f"{pidx}:{fidx}:{pts}:{d}" if d else f"{pidx}:{fidx}:{pts}")
+            cmd += ["--assist_points", "|".join(assist_parts)]
+            print(f"[Worker GPU {gpu_id}]   Assist points for {camera_name}/{video_name}: {len(ep_clicks)} group(s)")
+        elif isinstance(ep_clicks, dict) and ep_clicks:
+            # Legacy mode: separate SAM2 tracker pass
             pbf_parts = []
             plbf_parts = []
             frame_count = 0
@@ -197,6 +225,8 @@ def run_worker(
                 cmd += ["--point_labels_by_frame", point_labels_by_frame]
         if ep_prompt_idx is not None:
             cmd += ["--points_prompt_idx", str(ep_prompt_idx)]
+        if prompt_extra_frames_str:
+            cmd += ["--prompt_extra_frames", prompt_extra_frames_str]
         if save_video:
             cmd += ["--save_video"]
         if save_side_by_side:
@@ -273,6 +303,14 @@ def run_worker(
                     "--pp_topright_rect_y_threshold", str(pp_topright_rect_y_threshold),
                     "--pp_topright_rect_frame_start_ratio", str(pp_topright_rect_frame_start_ratio),
                 ]
+            if pp_leftmost_rect:
+                cmd += [
+                    "--pp_leftmost_rect",
+                    "--pp_leftmost_rect_label", str(pp_leftmost_rect_label),
+                    "--pp_leftmost_rect_fill", str(pp_leftmost_rect_fill),
+                    "--pp_leftmost_rect_y_max", str(pp_leftmost_rect_y_max),
+                    "--pp_leftmost_rect_skip_label", str(pp_leftmost_rect_skip_label),
+                ]
 
         try:
             subprocess.run(cmd, env=env, check=True)
@@ -289,6 +327,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompts", nargs="+", required=True, help="Prompts list")
     parser.add_argument("--cameras", nargs="+", required=True, help="List of camera folder names to scan")
     parser.add_argument("--gpu_ids", nargs="+", type=int, default=None, help="Specific GPU IDs to use. If None, uses all available.")
+    parser.add_argument("--workers_per_gpu", type=int, default=1, help="Number of parallel workers per GPU (default: 1).")
     parser.add_argument("--points", type=str, default=None, help="Extra points as 'x1,y1;x2,y2;...'.")
     parser.add_argument("--point_labels", type=str, default=None, help="Point labels as '1,0,1,...'.")
     parser.add_argument("--points_frame_idx", type=int, default=None, help="Frame index for points.")
@@ -345,6 +384,12 @@ if __name__ == "__main__":
     parser.add_argument("--pp_topright_rect_y_max", type=int, default=420)
     parser.add_argument("--pp_topright_rect_y_threshold", type=int, default=200)
     parser.add_argument("--pp_topright_rect_frame_start_ratio", type=float, default=0.667)
+    parser.add_argument("--pp_leftmost_rect", action="store_true",
+                        help="Fill bg below-left of leftmost label pixel. First half: always. Second half: only if skip_label absent.")
+    parser.add_argument("--pp_leftmost_rect_label", type=int, default=1)
+    parser.add_argument("--pp_leftmost_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_leftmost_rect_y_max", type=int, default=420)
+    parser.add_argument("--pp_leftmost_rect_skip_label", type=int, default=3)
     parser.add_argument("--pp_overwrite", action="store_true", help="Postprocess: overwrite existing *_masks_post.npz.")
     parser.add_argument(
         "--pp_per_camera",
@@ -361,6 +406,13 @@ if __name__ == "__main__":
         "--skip_if_exists",
         action="store_true",
         help="Skip processing if output mask file already exists.",
+    )
+    parser.add_argument(
+        "--skip_if_masks_dir",
+        type=str,
+        default=None,
+        help="Additional masks directory to check when --skip_if_exists is set. "
+             "Structure: {dir}/chunk-000/{camera}/{episode}_masks.npz",
     )
     parser.add_argument(
         "--static_prompts",
@@ -389,16 +441,50 @@ if __name__ == "__main__":
         help='JSON file with per-episode point clicks. '
              'Format: {"camera": {"episode": {"frame_idx": {"points": "x,y;...", "labels": "l,..."}}}}',
     )
-    
+    parser.add_argument("--pp_corner_rect", action="store_true",
+                        help="Fill bg rect from top-corner of label(s).")
+    parser.add_argument("--pp_corner_rect_mode", type=str, default="topright",
+                        help='Corner mode: "topright" or "topleft" (default: topright).')
+    parser.add_argument("--pp_corner_rect_labels", type=str, default=None,
+                        help='Comma-separated source labels, e.g. "1,3".')
+    parser.add_argument("--pp_corner_rect_fill", type=int, default=4,
+                        help="Fill value for corner rect (default: 4).")
+    parser.add_argument("--pp_corner_rect_y_max", type=int, default=420,
+                        help="Bottom boundary of fill rect (default: 420).")
+    parser.add_argument("--pp_corner_rect_x_first_labels", type=str, default=None,
+                        help='Comma-separated labels using x-first anchor, e.g. "3".')
+    parser.add_argument("--pp_temporal_fill", action="store_true",
+                        help="Forward temporal fill: propagate labels to next frame bg pixels.")
+    parser.add_argument("--pp_temporal_fill_labels", type=str, default=None,
+                        help='Comma-separated labels for forward/backward propagation, e.g. "1,5".')
+    parser.add_argument("--pp_temporal_fill_union_labels", type=str, default=None,
+                        help='Comma-separated labels for union fill, e.g. "3,4".')
+    parser.add_argument("--pp_temporal_fill_value", type=int, default=5,
+                        help="Fill value for temporal fill (default: 5).")
+
     args = parser.parse_args()
     
     # Load per-episode point clicks if provided
     point_clicks = None
+    prompt_extra_frames_str = ""
     if args.point_clicks_json:
         import json
         with open(args.point_clicks_json) as f:
             point_clicks = json.load(f)
-        total_eps = sum(len(eps) for eps in point_clicks.values())
+        # Extract prompt_extra_frames (global, not per-camera)
+        pef = point_clicks.pop("prompt_extra_frames", None)
+        if pef:
+            # Convert {"2": [-1], "0": [0, 100]} → "2:-1|0:0|0:100"
+            parts = []
+            for pidx, frames in pef.items():
+                for f in frames:
+                    parts.append(f"{pidx}:{f}")
+            prompt_extra_frames_str = "|".join(parts)
+            print(f"Prompt extra frames: {pef}")
+        total_eps = sum(
+            len(eps) for k, eps in point_clicks.items()
+            if isinstance(eps, dict)
+        )
         print(f"Loaded point_clicks_json: {total_eps} episode(s) across {len(point_clicks)} camera(s)")
     
     # Get script directory (where this python file is located)
@@ -434,17 +520,18 @@ if __name__ == "__main__":
     else:
         gpu_ids = get_available_gpus()
     
-    print(f"Using GPUs: {gpu_ids}")
+    print(f"Using GPUs: {gpu_ids} (workers_per_gpu={args.workers_per_gpu})")
     
-    # 3. Distribute work across GPUs
+    # 3. Distribute work across GPUs (repeat each GPU for multiple workers)
     if debug_sample == 1:
         gpu_ids = [gpu_ids[0]]
-    chunks = chunk_list(all_videos, len(gpu_ids))
+    worker_gpu_ids = [gid for gid in gpu_ids for _ in range(args.workers_per_gpu)]
+    chunks = chunk_list(all_videos, len(worker_gpu_ids))
     
     per_camera = _parse_pp_per_camera(args.pp_per_camera)
     default_classes = _parse_class_list(args.pp_fill_interior_class)
     processes = []
-    for i, gpu_id in enumerate(gpu_ids):
+    for i, gpu_id in enumerate(worker_gpu_ids):
         if i < len(chunks) and chunks[i]:
             p = multiprocessing.Process(
                 target=run_worker,
@@ -490,6 +577,7 @@ if __name__ == "__main__":
                     args.pp_fill_interior_target,
                     per_camera,
                     args.skip_if_exists,
+                    args.skip_if_masks_dir,
                     args.static_prompts,
                     args.pp_topleft_rect,
                     args.pp_topleft_rect_label,
@@ -503,7 +591,13 @@ if __name__ == "__main__":
                     args.pp_topright_rect_y_max,
                     args.pp_topright_rect_y_threshold,
                     args.pp_topright_rect_frame_start_ratio,
+                    args.pp_leftmost_rect,
+                    args.pp_leftmost_rect_label,
+                    args.pp_leftmost_rect_fill,
+                    args.pp_leftmost_rect_y_max,
+                    args.pp_leftmost_rect_skip_label,
                     point_clicks,
+                    prompt_extra_frames_str,
                 )
             )
             processes.append(p)
@@ -606,6 +700,21 @@ if __name__ == "__main__":
                         topright_rect_y_max=args.pp_topright_rect_y_max,
                         topright_rect_y_threshold=args.pp_topright_rect_y_threshold,
                         topright_rect_frame_start_ratio=args.pp_topright_rect_frame_start_ratio,
+                        leftmost_rect_enabled=args.pp_leftmost_rect,
+                        leftmost_rect_label=args.pp_leftmost_rect_label,
+                        leftmost_rect_fill=args.pp_leftmost_rect_fill,
+                        leftmost_rect_y_max=args.pp_leftmost_rect_y_max,
+                        leftmost_rect_skip_label=args.pp_leftmost_rect_skip_label,
+                        corner_rect_enabled=args.pp_corner_rect,
+                        corner_rect_mode=args.pp_corner_rect_mode,
+                        corner_rect_labels=[int(x) for x in args.pp_corner_rect_labels.split(",")] if args.pp_corner_rect_labels else None,
+                        corner_rect_fill=args.pp_corner_rect_fill,
+                        corner_rect_y_max=args.pp_corner_rect_y_max,
+                        corner_rect_x_first_labels=[int(x) for x in args.pp_corner_rect_x_first_labels.split(",")] if args.pp_corner_rect_x_first_labels else None,
+                        temporal_fill_enabled=args.pp_temporal_fill,
+                        temporal_fill_labels=[int(x) for x in args.pp_temporal_fill_labels.split(",")] if args.pp_temporal_fill_labels else None,
+                        temporal_fill_union_labels=[int(x) for x in args.pp_temporal_fill_union_labels.split(",")] if args.pp_temporal_fill_union_labels else None,
+                        temporal_fill_value=args.pp_temporal_fill_value,
                     )
 
     print("All segmentation tasks completed.")

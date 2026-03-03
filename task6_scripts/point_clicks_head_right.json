@@ -1,0 +1,11 @@
+{
+    "observation.images.head_right_camera_color_optical_frame": {
+        "_default": [
+            {
+                "assist_prompt_idx": 3,
+                "frame_idx": 0,
+                "points": "276,279"
+            }
+        ]
+    }
+}
