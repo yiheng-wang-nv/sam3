@@ -9,8 +9,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # ──────────────── Configuration ────────────────
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/sztask6_020902100211021202260227_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/sztask6_020902100211021202260227_merged/sam3_output"
+DATASET_DIR="/localhome/local-vennw/code/sztask6_020902100211021202260227_merged"
+CHUNKS=("chunk-000" "chunk-001")
 
 HEAD_LEFT_CAMERA="observation.images.head_left_camera_color_optical_frame"
 HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
@@ -25,7 +25,8 @@ CAMERAS=(
 )
 
 GPU_IDS="0 1 2 3 5 6 7"
-WORKERS_PER_GPU=4
+WORKERS_PER_GPU=2
+PP_OVERWRITE=false
 
 # ── Per-camera prompts ──
 get_camera_prompts() {
@@ -134,8 +135,8 @@ build_pp_flags() {
     --pp_min_hole_size "$PP_MIN_HOLE_SIZE"
     --pp_min_object_size "$PP_MIN_OBJECT_SIZE"
     --pp_closing_iterations "$PP_CLOSING_ITERATIONS"
-    --pp_overwrite
   )
+  [ "$PP_OVERWRITE" = true ] && PP_FLAGS+=(--pp_overwrite)
   [ "$PP_NO_REMOVE_SMALL_OBJECTS" = true ] && PP_FLAGS+=(--pp_no_remove_small_objects)
   [ "$PP_UNION_HOLE_FILL" = true ] && PP_FLAGS+=(--pp_union_hole_fill)
   if [ "$PP_UNION_GAP_FILL" = true ]; then
@@ -150,44 +151,58 @@ build_pp_flags() {
 echo "🚀 Starting Parallel Segmentation Job (task6, 4 cameras)"
 echo "--------------------------------------------------------------"
 echo "SAM3 Dir:  $SAM3_DIR"
-echo "Base Dir:  $BASE_DIR"
-echo "Output:    $BASE_OUTPUT_DIR"
+echo "Dataset:   $DATASET_DIR"
+echo "Chunks:    ${CHUNKS[*]}"
 echo "Cameras:   ${CAMERAS[*]}"
 echo "GPUs:      ${GPU_IDS}"
 echo "--------------------------------------------------------------"
 
-# ──────────────── Run each camera ────────────────
-for cam in "${CAMERAS[@]}"; do
-  get_camera_prompts "$cam"
-  local_point_clicks=$(get_camera_point_clicks "$cam")
-  get_camera_pp_extra "$cam"
-  get_camera_fill_interior "$cam"
-  build_pp_flags "$REPLY_FILL_CLASS" "$REPLY_FILL_TARGET"
+# ──────────────── Run each chunk × camera ────────────────
+for chunk in "${CHUNKS[@]}"; do
+  BASE_DIR="${DATASET_DIR}/videos/${chunk}"
+  BASE_OUTPUT_DIR="${DATASET_DIR}/sam3_output"
 
-  CAM_FLAGS=()
-  if [ -n "$local_point_clicks" ] && [ -f "$local_point_clicks" ]; then
-    CAM_FLAGS+=(--point_clicks_json "$local_point_clicks")
-    echo "  [$cam] Point clicks: $local_point_clicks"
+  if [ ! -d "$BASE_DIR" ]; then
+    echo "⚠️  Skipping ${chunk}: ${BASE_DIR} not found"
+    continue
   fi
 
-  echo "-> Running ${cam}"
-  echo "   Prompts: ${REPLY_PROMPTS[*]}"
+  echo "============================================================"
+  echo "  Processing ${chunk}"
+  echo "============================================================"
 
-  python "${SAM3_DIR}/batch_run_parallel.py" \
-    --base_dir "$BASE_DIR" \
-    --checkpoint "$CHECKPOINT" \
-    --output_dir "$BASE_OUTPUT_DIR" \
-    --cameras "$cam" \
-    --prompts "${REPLY_PROMPTS[@]}" \
-    --save_npz \
-    --no_pkl \
-    --postprocess \
-    "${PP_FLAGS[@]}" \
-    "${REPLY_PP_EXTRA[@]}" \
-    "${CAM_FLAGS[@]}" \
-    --skip_if_exists \
-    --gpu_ids $GPU_IDS \
-    --workers_per_gpu "$WORKERS_PER_GPU"
+  for cam in "${CAMERAS[@]}"; do
+    get_camera_prompts "$cam"
+    local_point_clicks=$(get_camera_point_clicks "$cam")
+    get_camera_pp_extra "$cam"
+    get_camera_fill_interior "$cam"
+    build_pp_flags "$REPLY_FILL_CLASS" "$REPLY_FILL_TARGET"
+
+    CAM_FLAGS=()
+    if [ -n "$local_point_clicks" ] && [ -f "$local_point_clicks" ]; then
+      CAM_FLAGS+=(--point_clicks_json "$local_point_clicks")
+      echo "  [$cam] Point clicks: $local_point_clicks"
+    fi
+
+    echo "-> [${chunk}] Running ${cam}"
+    echo "   Prompts: ${REPLY_PROMPTS[*]}"
+
+    python "${SAM3_DIR}/batch_run_parallel.py" \
+      --base_dir "$BASE_DIR" \
+      --checkpoint "$CHECKPOINT" \
+      --output_dir "$BASE_OUTPUT_DIR" \
+      --cameras "$cam" \
+      --prompts "${REPLY_PROMPTS[@]}" \
+      --save_npz \
+      --no_pkl \
+      --postprocess \
+      "${PP_FLAGS[@]}" \
+      "${REPLY_PP_EXTRA[@]}" \
+      "${CAM_FLAGS[@]}" \
+      --skip_if_exists \
+      --gpu_ids $GPU_IDS \
+      --workers_per_gpu "$WORKERS_PER_GPU"
+  done
 done
 
 echo "🎉 Batch segmentation job finished!"

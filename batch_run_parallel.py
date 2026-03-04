@@ -16,12 +16,12 @@ def chunk_list(data, num_chunks):
     """Split list into N roughly equal chunks"""
     if num_chunks <= 0:
         return [data]
-    avg = len(data) / float(num_chunks)
+    n = len(data)
     out = []
-    last = 0.0
-    while last < len(data):
-        out.append(data[int(last):int(last + avg)])
-        last += avg
+    for i in range(num_chunks):
+        start = i * n // num_chunks
+        end = (i + 1) * n // num_chunks
+        out.append(data[start:end])
     return out
 
 
@@ -319,6 +319,281 @@ def run_worker(
 
     print(f"[Worker GPU {gpu_id}] Finished.")
 
+
+def _check_single_npz(filepath):
+    """Check a single npz file. Returns (filepath, error_msg) if corrupt, else (filepath, None)."""
+    import numpy as np
+    try:
+        data = np.load(filepath)
+        _ = data['arr_0'].shape
+        data.close()
+        return filepath, None
+    except Exception as e:
+        return filepath, str(e)
+
+
+def scan_and_remove_corrupt_npz(output_dir, cameras, num_workers=32):
+    """Scan existing *_masks.npz files and remove corrupt ones before distributing work."""
+    all_files = []
+    for cam in cameras:
+        cam_dir = os.path.join(output_dir, cam)
+        if not os.path.isdir(cam_dir):
+            continue
+        all_files.extend(glob.glob(os.path.join(cam_dir, "*_masks.npz")))
+
+    if not all_files:
+        print("Integrity scan: no npz files to check.")
+        return 0
+
+    removed = 0
+    n = min(num_workers, len(all_files))
+    with multiprocessing.Pool(n) as pool:
+        for filepath, error in pool.imap_unordered(_check_single_npz, all_files, chunksize=16):
+            if error is not None:
+                print(f"  [CORRUPT] Removing {filepath}  ({error})")
+                os.remove(filepath)
+                removed += 1
+
+    print(f"Integrity scan: checked {len(all_files)} npz files, removed {removed} corrupt.")
+    return removed
+
+
+def filter_videos_skip_existing(all_videos, base_output_dir, skip_if_masks_dir=None):
+    """Pre-filter videos: only return those that still need processing."""
+    needed = []
+    skipped = 0
+    for video_path in all_videos:
+        parts = video_path.split(os.sep)
+        try:
+            camera_name = parts[-2]
+            output_dir = os.path.join(base_output_dir, camera_name)
+        except IndexError:
+            output_dir = base_output_dir
+            camera_name = ""
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        expected_output = os.path.join(output_dir, f"{video_name}_masks.npz")
+        expected_post = os.path.join(output_dir, f"{video_name}_masks_post.npz")
+        if os.path.exists(expected_output) or os.path.exists(expected_post):
+            skipped += 1
+            continue
+        if skip_if_masks_dir and camera_name:
+            masks_path = os.path.join(skip_if_masks_dir, "chunk-000", camera_name, f"{video_name}_masks.npz")
+            if os.path.exists(masks_path):
+                skipped += 1
+                continue
+        needed.append(video_path)
+    if skipped:
+        print(f"Skipped {skipped} videos (outputs already exist), {len(needed)} remaining.")
+    return needed
+
+
+def run_worker_batch(
+    gpu_id,
+    video_list,
+    checkpoint,
+    prompts,
+    base_output_dir,
+    point_clicks,
+    prompt_extra_frames_str,
+    save_video,
+    save_side_by_side,
+    max_frames,
+    save_npz,
+    npz_separate,
+    no_pkl,
+    invert_mask,
+    postprocess_for_vis,
+    pp_min_hole_size,
+    pp_min_object_size,
+    pp_closing_iterations,
+    pp_no_fill_holes,
+    pp_no_remove_small_objects,
+    pp_union_hole_fill,
+    pp_union_gap_fill,
+    pp_union_gap_closing_iterations,
+    pp_fill_blue_table_quadrant,
+    pp_blue_table_label,
+    pp_blue_table_target,
+    pp_blue_table_quadrant_mode,
+    pp_blue_table_y_pad_top,
+    pp_blue_table_y_pad_bottom,
+    pp_blue_table_skip_if_label_above,
+    pp_blue_table_skip_if_label_area_gt,
+    pp_fill_interior_class,
+    pp_fill_interior_target,
+    pp_per_camera,
+    static_prompts,
+    pp_topleft_rect,
+    pp_topleft_rect_label,
+    pp_topleft_rect_fill,
+    pp_topleft_rect_y_max,
+    pp_topleft_rect_frame_start,
+    pp_topleft_rect_frame_end_ratio,
+    pp_topright_rect,
+    pp_topright_rect_label,
+    pp_topright_rect_fill,
+    pp_topright_rect_y_max,
+    pp_topright_rect_y_threshold,
+    pp_topright_rect_frame_start_ratio,
+    pp_leftmost_rect,
+    pp_leftmost_rect_label,
+    pp_leftmost_rect_fill,
+    pp_leftmost_rect_y_max,
+    pp_leftmost_rect_skip_label,
+    points=None,
+    point_labels=None,
+    points_frame_idx=None,
+    points_by_frame=None,
+    point_labels_by_frame=None,
+    points_prompt_idx=None,
+):
+    """Batch worker: load model ONCE, then process all assigned videos in-process."""
+    import argparse as _argparse
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    from produce_masks import process_single_video
+    from sam3.model_builder import build_sam3_video_predictor
+
+    print(f"[Worker GPU {gpu_id}] Loading SAM3 model (once for {len(video_list)} videos)...")
+    video_predictor = build_sam3_video_predictor(checkpoint)
+    print(f"[Worker GPU {gpu_id}] Model loaded. Starting batch processing...")
+
+    for vid_idx, video_path in enumerate(video_list):
+        parts = video_path.split(os.sep)
+        try:
+            camera_name = parts[-2]
+            output_dir = os.path.join(base_output_dir, camera_name)
+        except IndexError:
+            output_dir = base_output_dir
+            camera_name = ""
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+
+        # Resolve per-camera fill classes
+        fill_class = pp_fill_interior_class
+        fill_target = pp_fill_interior_target
+        if pp_per_camera and camera_name in pp_per_camera:
+            cam_classes, cam_target = pp_per_camera[camera_name]
+            if cam_classes is not None:
+                fill_class = cam_classes
+            if cam_target is not None:
+                fill_target = cam_target
+        fill_class_str = ",".join(str(c) for c in fill_class) if fill_class else None
+
+        # Resolve per-episode point clicks → assist_points string
+        assist_points_str = ""
+        ep_local_points = points
+        ep_local_labels = point_labels
+        ep_local_frame_idx = points_frame_idx
+        ep_local_by_frame = points_by_frame
+        ep_local_labels_by_frame = point_labels_by_frame
+        ep_local_prompt_idx = points_prompt_idx
+
+        if point_clicks and camera_name:
+            cam_clicks = point_clicks.get(camera_name, {})
+            ep_clicks = cam_clicks.get(video_name, cam_clicks.get("_default", None))
+            if isinstance(ep_clicks, list):
+                assist_parts = []
+                for entry in ep_clicks:
+                    pidx = entry["assist_prompt_idx"]
+                    fidx = entry.get("frame_idx", 0)
+                    pts = entry["points"]
+                    d = entry.get("direction", "")
+                    assist_parts.append(f"{pidx}:{fidx}:{pts}:{d}" if d else f"{pidx}:{fidx}:{pts}")
+                assist_points_str = "|".join(assist_parts)
+                ep_local_points = None
+                ep_local_labels = None
+            elif isinstance(ep_clicks, dict) and ep_clicks:
+                pbf_parts = []
+                plbf_parts = []
+                for fkey, fval in sorted(ep_clicks.items(), key=lambda kv: int(kv[0])):
+                    pbf_parts.append(f"{fkey}: {fval['points']}")
+                    plbf_parts.append(f"{fkey}: {fval['labels']}")
+                ep_local_by_frame = "|".join(pbf_parts)
+                ep_local_labels_by_frame = "|".join(plbf_parts)
+                ep_local_prompt_idx = ep_clicks.get(list(ep_clicks.keys())[0], {}).get("prompt_idx", points_prompt_idx)
+                ep_local_points = None
+                ep_local_labels = None
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        args = _argparse.Namespace(
+            checkpoint_path=checkpoint,
+            video_path=video_path,
+            output_dir=output_dir,
+            prompts=prompts,
+            fps=30,
+            save_video=save_video,
+            save_side_by_side=save_side_by_side,
+            max_frames=max_frames,
+            save_npz=save_npz,
+            npz_separate=npz_separate,
+            no_pkl=no_pkl,
+            invert_mask=invert_mask,
+            static_prompts=static_prompts,
+            points=ep_local_points or "",
+            point_labels=ep_local_labels or "",
+            points_frame_idx=ep_local_frame_idx if ep_local_frame_idx is not None else 0,
+            points_by_frame=ep_local_by_frame or "",
+            point_labels_by_frame=ep_local_labels_by_frame or "",
+            points_prompt_idx=ep_local_prompt_idx,
+            assist_points=assist_points_str,
+            prompt_extra_frames=prompt_extra_frames_str,
+            postprocess_for_vis=postprocess_for_vis,
+            postprocess_only=False,
+            pp_min_hole_size=pp_min_hole_size,
+            pp_min_object_size=pp_min_object_size,
+            pp_closing_iterations=pp_closing_iterations,
+            pp_no_fill_holes=pp_no_fill_holes,
+            pp_no_remove_small_objects=pp_no_remove_small_objects,
+            pp_union_hole_fill=pp_union_hole_fill,
+            pp_union_gap_fill=pp_union_gap_fill,
+            pp_union_gap_closing_iterations=pp_union_gap_closing_iterations,
+            pp_fill_blue_table_quadrant=pp_fill_blue_table_quadrant,
+            pp_blue_table_label=pp_blue_table_label,
+            pp_blue_table_target=pp_blue_table_target,
+            pp_blue_table_quadrant_mode=pp_blue_table_quadrant_mode,
+            pp_blue_table_y_pad_top=pp_blue_table_y_pad_top,
+            pp_blue_table_y_pad_bottom=pp_blue_table_y_pad_bottom,
+            pp_blue_table_skip_if_label_above=pp_blue_table_skip_if_label_above,
+            pp_blue_table_skip_if_label_area_gt=pp_blue_table_skip_if_label_area_gt,
+            pp_fill_interior_class=fill_class_str,
+            pp_fill_interior_target=fill_target,
+            pp_overwrite=False,
+            pp_fill_bg_roi=None,
+            pp_scanline_fill=False,
+            pp_scanline_source_label=1,
+            pp_scanline_fill_value=3,
+            pp_topleft_rect=pp_topleft_rect,
+            pp_topleft_rect_label=pp_topleft_rect_label,
+            pp_topleft_rect_fill=pp_topleft_rect_fill,
+            pp_topleft_rect_y_max=pp_topleft_rect_y_max,
+            pp_topleft_rect_frame_start=pp_topleft_rect_frame_start,
+            pp_topleft_rect_frame_end_ratio=pp_topleft_rect_frame_end_ratio,
+            pp_topright_rect=pp_topright_rect,
+            pp_topright_rect_label=pp_topright_rect_label,
+            pp_topright_rect_fill=pp_topright_rect_fill,
+            pp_topright_rect_y_max=pp_topright_rect_y_max,
+            pp_topright_rect_y_threshold=pp_topright_rect_y_threshold,
+            pp_topright_rect_frame_start_ratio=pp_topright_rect_frame_start_ratio,
+            pp_leftmost_rect=pp_leftmost_rect,
+            pp_leftmost_rect_label=pp_leftmost_rect_label,
+            pp_leftmost_rect_fill=pp_leftmost_rect_fill,
+            pp_leftmost_rect_y_max=pp_leftmost_rect_y_max,
+            pp_leftmost_rect_skip_label=pp_leftmost_rect_skip_label,
+        )
+
+        print(f"[Worker GPU {gpu_id}] ({vid_idx+1}/{len(video_list)}) {video_path}")
+        try:
+            process_single_video(video_predictor, args)
+        except Exception as e:
+            print(f"[Worker GPU {gpu_id}] ERROR processing {video_path}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    print(f"[Worker GPU {gpu_id}] Finished all {len(video_list)} videos.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parallel SAM3 segmentation across multiple GPUs (PKL output only)")
     parser.add_argument("--base_dir", required=True, help="Base directory containing camera folders")
@@ -461,6 +736,8 @@ if __name__ == "__main__":
                         help='Comma-separated labels for union fill, e.g. "3,4".')
     parser.add_argument("--pp_temporal_fill_value", type=int, default=5,
                         help="Fill value for temporal fill (default: 5).")
+    parser.add_argument("--legacy_subprocess", action="store_true",
+                        help="Use legacy subprocess-per-video mode instead of batch worker.")
 
     args = parser.parse_args()
     
@@ -514,6 +791,22 @@ if __name__ == "__main__":
         all_videos = random.sample(all_videos, n)
         print(f"Debug mode: sampled {n} video(s)")
 
+    # Integrity scan: detect and remove corrupt npz files before filtering
+    if args.skip_if_exists:
+        print("Running integrity scan on existing outputs...")
+        scan_and_remove_corrupt_npz(args.output_dir, args.cameras)
+
+    # Upfront skip-if-exists filtering (before distributing work)
+    if args.skip_if_exists:
+        all_videos = filter_videos_skip_existing(
+            all_videos, args.output_dir, args.skip_if_masks_dir
+        )
+        if not all_videos:
+            print("All videos already processed. Nothing to do.")
+            # Still run postprocess if requested
+            if not args.postprocess:
+                exit(0)
+
     # 2. Assign GPUs
     if args.gpu_ids:
         gpu_ids = args.gpu_ids
@@ -531,81 +824,157 @@ if __name__ == "__main__":
     per_camera = _parse_pp_per_camera(args.pp_per_camera)
     default_classes = _parse_class_list(args.pp_fill_interior_class)
     processes = []
-    for i, gpu_id in enumerate(worker_gpu_ids):
-        if i < len(chunks) and chunks[i]:
-            p = multiprocessing.Process(
-                target=run_worker,
-                args=(
-                    gpu_id,
-                    chunks[i],
-                    args.checkpoint,
-                    args.prompts,
-                    args.output_dir,
-                    script_dir,
-                    args.points,
-                    args.point_labels,
-                    args.points_frame_idx,
-                    args.points_by_frame,
-                    args.point_labels_by_frame,
-                    args.points_prompt_idx,
-                    args.save_video,
-                    args.save_side_by_side,
-                    args.max_frames,
-                    args.save_npz,
-                    args.npz_separate,
-                    args.no_pkl,
-                    args.debug_one,
-                    args.invert_mask,
-                    args.postprocess_for_vis,
-                    args.pp_min_hole_size,
-                    args.pp_min_object_size,
-                    args.pp_closing_iterations,
-                    args.pp_no_fill_holes,
-                    args.pp_no_remove_small_objects,
-                    args.pp_union_hole_fill,
-                    args.pp_union_gap_fill,
-                    args.pp_union_gap_closing_iterations,
-                    args.pp_fill_blue_table_quadrant,
-                    args.pp_blue_table_label,
-                    args.pp_blue_table_target,
-                    args.pp_blue_table_quadrant_mode,
-                    args.pp_blue_table_y_pad_top,
-                    args.pp_blue_table_y_pad_bottom,
-                    args.pp_blue_table_skip_if_label_above,
-                    args.pp_blue_table_skip_if_label_area_gt,
-                    default_classes,
-                    args.pp_fill_interior_target,
-                    per_camera,
-                    args.skip_if_exists,
-                    args.skip_if_masks_dir,
-                    args.static_prompts,
-                    args.pp_topleft_rect,
-                    args.pp_topleft_rect_label,
-                    args.pp_topleft_rect_fill,
-                    args.pp_topleft_rect_y_max,
-                    args.pp_topleft_rect_frame_start,
-                    args.pp_topleft_rect_frame_end_ratio,
-                    args.pp_topright_rect,
-                    args.pp_topright_rect_label,
-                    args.pp_topright_rect_fill,
-                    args.pp_topright_rect_y_max,
-                    args.pp_topright_rect_y_threshold,
-                    args.pp_topright_rect_frame_start_ratio,
-                    args.pp_leftmost_rect,
-                    args.pp_leftmost_rect_label,
-                    args.pp_leftmost_rect_fill,
-                    args.pp_leftmost_rect_y_max,
-                    args.pp_leftmost_rect_skip_label,
-                    point_clicks,
-                    prompt_extra_frames_str,
+
+    if args.legacy_subprocess:
+        for i, gpu_id in enumerate(worker_gpu_ids):
+            if i < len(chunks) and chunks[i]:
+                p = multiprocessing.Process(
+                    target=run_worker,
+                    args=(
+                        gpu_id,
+                        chunks[i],
+                        args.checkpoint,
+                        args.prompts,
+                        args.output_dir,
+                        script_dir,
+                        args.points,
+                        args.point_labels,
+                        args.points_frame_idx,
+                        args.points_by_frame,
+                        args.point_labels_by_frame,
+                        args.points_prompt_idx,
+                        args.save_video,
+                        args.save_side_by_side,
+                        args.max_frames,
+                        args.save_npz,
+                        args.npz_separate,
+                        args.no_pkl,
+                        args.debug_one,
+                        args.invert_mask,
+                        args.postprocess_for_vis,
+                        args.pp_min_hole_size,
+                        args.pp_min_object_size,
+                        args.pp_closing_iterations,
+                        args.pp_no_fill_holes,
+                        args.pp_no_remove_small_objects,
+                        args.pp_union_hole_fill,
+                        args.pp_union_gap_fill,
+                        args.pp_union_gap_closing_iterations,
+                        args.pp_fill_blue_table_quadrant,
+                        args.pp_blue_table_label,
+                        args.pp_blue_table_target,
+                        args.pp_blue_table_quadrant_mode,
+                        args.pp_blue_table_y_pad_top,
+                        args.pp_blue_table_y_pad_bottom,
+                        args.pp_blue_table_skip_if_label_above,
+                        args.pp_blue_table_skip_if_label_area_gt,
+                        default_classes,
+                        args.pp_fill_interior_target,
+                        per_camera,
+                        False,  # skip_if_exists already done upfront
+                        None,   # skip_if_masks_dir already done upfront
+                        args.static_prompts,
+                        args.pp_topleft_rect,
+                        args.pp_topleft_rect_label,
+                        args.pp_topleft_rect_fill,
+                        args.pp_topleft_rect_y_max,
+                        args.pp_topleft_rect_frame_start,
+                        args.pp_topleft_rect_frame_end_ratio,
+                        args.pp_topright_rect,
+                        args.pp_topright_rect_label,
+                        args.pp_topright_rect_fill,
+                        args.pp_topright_rect_y_max,
+                        args.pp_topright_rect_y_threshold,
+                        args.pp_topright_rect_frame_start_ratio,
+                        args.pp_leftmost_rect,
+                        args.pp_leftmost_rect_label,
+                        args.pp_leftmost_rect_fill,
+                        args.pp_leftmost_rect_y_max,
+                        args.pp_leftmost_rect_skip_label,
+                        point_clicks,
+                        prompt_extra_frames_str,
+                    )
                 )
-            )
-            processes.append(p)
-            p.start()
+                processes.append(p)
+                p.start()
+    else:
+        for i, gpu_id in enumerate(worker_gpu_ids):
+            if i < len(chunks) and chunks[i]:
+                p = multiprocessing.Process(
+                    target=run_worker_batch,
+                    args=(
+                        gpu_id,
+                        chunks[i],
+                        args.checkpoint,
+                        args.prompts,
+                        args.output_dir,
+                        point_clicks,
+                        prompt_extra_frames_str,
+                        args.save_video,
+                        args.save_side_by_side,
+                        args.max_frames,
+                        args.save_npz,
+                        args.npz_separate,
+                        args.no_pkl,
+                        args.invert_mask,
+                        args.postprocess_for_vis,
+                        args.pp_min_hole_size,
+                        args.pp_min_object_size,
+                        args.pp_closing_iterations,
+                        args.pp_no_fill_holes,
+                        args.pp_no_remove_small_objects,
+                        args.pp_union_hole_fill,
+                        args.pp_union_gap_fill,
+                        args.pp_union_gap_closing_iterations,
+                        args.pp_fill_blue_table_quadrant,
+                        args.pp_blue_table_label,
+                        args.pp_blue_table_target,
+                        args.pp_blue_table_quadrant_mode,
+                        args.pp_blue_table_y_pad_top,
+                        args.pp_blue_table_y_pad_bottom,
+                        args.pp_blue_table_skip_if_label_above,
+                        args.pp_blue_table_skip_if_label_area_gt,
+                        default_classes,
+                        args.pp_fill_interior_target,
+                        per_camera,
+                        args.static_prompts,
+                        args.pp_topleft_rect,
+                        args.pp_topleft_rect_label,
+                        args.pp_topleft_rect_fill,
+                        args.pp_topleft_rect_y_max,
+                        args.pp_topleft_rect_frame_start,
+                        args.pp_topleft_rect_frame_end_ratio,
+                        args.pp_topright_rect,
+                        args.pp_topright_rect_label,
+                        args.pp_topright_rect_fill,
+                        args.pp_topright_rect_y_max,
+                        args.pp_topright_rect_y_threshold,
+                        args.pp_topright_rect_frame_start_ratio,
+                        args.pp_leftmost_rect,
+                        args.pp_leftmost_rect_label,
+                        args.pp_leftmost_rect_fill,
+                        args.pp_leftmost_rect_y_max,
+                        args.pp_leftmost_rect_skip_label,
+                        args.points,
+                        args.point_labels,
+                        args.points_frame_idx,
+                        args.points_by_frame,
+                        args.point_labels_by_frame,
+                        args.points_prompt_idx,
+                    )
+                )
+                processes.append(p)
+                p.start()
     
     for p in processes:
         p.join()
-        
+
+    failed_workers = [(p.name, p.exitcode) for p in processes if p.exitcode != 0]
+    if failed_workers:
+        print(f"WARNING: {len(failed_workers)} worker(s) exited with errors:")
+        for name, code in failed_workers:
+            print(f"  {name}: exit code {code}")
+
     if args.postprocess:
         if args.npz_separate:
             print("Postprocess skipped: --npz_separate outputs are not supported.")

@@ -632,19 +632,8 @@ def _run_postprocess_only(args):
     print("[postprocess_only] Done.")
 
 
-def main():
-    args = parse_args()
-    
-    # Ensure output directory exists
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    if args.postprocess_only:
-        _run_postprocess_only(args)
-        return
-    
-    print(f"Loading model from {args.checkpoint_path}...")
-    video_predictor = build_sam3_video_predictor(args.checkpoint_path)
-    
+def process_single_video(video_predictor, args):
+    """Process a single video with a pre-loaded SAM3 model. Handles session lifecycle."""
     video_path = args.video_path
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     if not video_name and os.path.isdir(video_path):
@@ -1263,6 +1252,25 @@ def main():
                 print(f"Side-by-side video saved to {output_compare_path}")
     else:
         print("Skipping video generation (--save_video not set).")
+
+    video_predictor.handle_request(
+        request=dict(type="close_session", session_id=session_id)
+    )
+
+
+def main():
+    args = parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.postprocess_only:
+        _run_postprocess_only(args)
+        return
+
+    print(f"Loading model from {args.checkpoint_path}...")
+    video_predictor = build_sam3_video_predictor(args.checkpoint_path)
+    process_single_video(video_predictor, args)
+
 
 if __name__ == "__main__":
     main()
