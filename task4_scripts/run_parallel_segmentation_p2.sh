@@ -6,8 +6,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task4-2_02260227_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task4-2_02260227_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task4-2_022602270305_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task4-2_022602270305_merged/sam3_output"
 
 # Camera names
 HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"

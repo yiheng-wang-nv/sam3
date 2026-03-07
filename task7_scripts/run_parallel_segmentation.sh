@@ -6,8 +6,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task7_0122020602240228_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task7_0122020602240228_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task7_01220206022402280306_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task7_01220206022402280306_merged/sam3_output"
 
 # Prompts (same for all cameras)
 PROMPTS=("blue table" "robotic arm(s)" "silver box")

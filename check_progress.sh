@@ -3,7 +3,7 @@
 #   dataset_dir: root dataset directory (default: sztask6 merged)
 #   Expects: dataset_dir/videos/chunk-*/  and  dataset_dir/sam3_output/
 
-DATASET_DIR="${1:-/localhome/local-vennw/code/sztask6_020902100211021202260227_merged}"
+DATASET_DIR="${1:-/localhome/local-vennw/code/task4-2_022602270305_merged}"
 OUTPUT_DIR="${DATASET_DIR}/sam3_output"
 
 echo "========================================"

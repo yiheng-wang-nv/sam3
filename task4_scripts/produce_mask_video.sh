@@ -5,13 +5,14 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
-VIDEO_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/videos/chunk-000"
-MASK_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/masks/chunk-000"
-OUTPUT_DIR="/localhome/local-vennw/code/task4-1_020202050212_merged/mask_comparison_videos"
+VIDEO_DIR="/localhome/local-vennw/code/task4-1_022602270304_merged/videos/chunk-000"
+MASK_DIR="/localhome/local-vennw/code/task4-1_022602270304_merged/masks/chunk-000"
+OUTPUT_DIR="/localhome/local-vennw/code/task4-1_022602270304_merged/mask_comparison_videos"
 
 CAMERAS=(
     "observation.images.head_right_camera_color_optical_frame"
     "observation.images.right_arm_camera_color_optical_frame"
+    "observation.images.left_arm_camera_color_optical_frame"
 )
 
 NUM_SAMPLES=2
