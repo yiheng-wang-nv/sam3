@@ -6,8 +6,8 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Configuration
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task5-2_01300203020402100214_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task5-2_01300203020402100214_merged/sam3_output"
+BASE_DIR="/localhome/local-vennw/code/task5-2_013002030204021002140309_merged/videos/chunk-000"
+BASE_OUTPUT_DIR="/localhome/local-vennw/code/task5-2_013002030204021002140309_merged/sam3_output"
 
 # Prompts (per camera)
 HEAD_RIGHT_PROMPTS=("blue table" "robotic arm(s)")
@@ -18,7 +18,9 @@ HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
 # GPU Selection
-GPU_IDS="0 1 2 3"
+GPU_IDS="0 1 2 3 5 6 7"
+WORKERS_PER_GPU=2
+SKIP_IF_MASKS_DIR="/localhome/local-vennw/code/task5-2_013002030204021002140309_merged/masks"
 
 # Postprocess settings (shared)
 PP_NUM_WORKERS=128
@@ -84,6 +86,8 @@ PP_COMMON_ARGS=(
   $( [ "$PP_UNION_GAP_FILL" = true ] && echo "--pp_union_gap_closing_iterations $PP_UNION_GAP_CLOSING_ITERATIONS" )
   --pp_overwrite
   --gpu_ids $GPU_IDS
+  --workers_per_gpu "$WORKERS_PER_GPU"
+  --skip_if_masks_dir "$SKIP_IF_MASKS_DIR"
 )
 
 echo "-> Running head right camera (with scanline fill)"

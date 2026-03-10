@@ -60,7 +60,7 @@ python "${SAM3_DIR}/batch_run_parallel.py" \
   --save_npz \
   --no_pkl \
   --skip_if_exists \
-  --skip_if_masks_dir "/localhome/local-vennw/code/task7_0122020602240228_merged/masks" \
+  --skip_if_masks_dir "/localhome/local-vennw/code/task7_01220206022402280306_merged/masks" \
   --postprocess \
   --pp_num_workers "$PP_NUM_WORKERS" \
   --pp_min_hole_size "$PP_MIN_HOLE_SIZE" \

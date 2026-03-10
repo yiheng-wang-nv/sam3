@@ -76,18 +76,17 @@ def main():
 
     if not raw_path.exists():
         raise FileNotFoundError(f"Raw mask not found: {raw_path}")
-    if not post_path.exists():
-        raise FileNotFoundError(f"Post mask not found: {post_path}")
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
+    has_post = post_path.exists()
+
     raw_masks = np.load(raw_path)["arr_0"]
-    post_masks = np.load(post_path)["arr_0"]
-
     raw_outputs = label_masks_to_outputs(raw_masks)
-    post_outputs = label_masks_to_outputs(post_masks)
+    if has_post:
+        post_masks = np.load(post_path)["arr_0"]
+        post_outputs = label_masks_to_outputs(post_masks)
 
-    # Read video frames
     cap = cv2.VideoCapture(str(video_path))
     frames = []
     while True:
@@ -103,19 +102,26 @@ def main():
     output_path = Path(args.output_path) if args.output_path else mask_dir / f"{args.episode}_comparison.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    n_panels = 3 if has_post else 2
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, args.fps, (width * 3, height))
+    writer = cv2.VideoWriter(str(output_path), fourcc, args.fps, (width * n_panels, height))
 
-    n_frames = min(len(frames), len(raw_outputs), len(post_outputs))
+    n_frames = min(len(frames), len(raw_outputs))
+    if has_post:
+        n_frames = min(n_frames, len(post_outputs))
     for t in range(n_frames):
         frame = load_frame(frames[t])
         raw_overlay = render_overlay(frame, raw_outputs.get(t, raw_outputs.get(0)))
-        post_overlay = render_overlay(frame, post_outputs.get(t, post_outputs.get(0)))
-        panel = np.concatenate([frame, raw_overlay, post_overlay], axis=1)
+        panels = [frame, raw_overlay]
+        if has_post:
+            post_overlay = render_overlay(frame, post_outputs.get(t, post_outputs.get(0)))
+            panels.append(post_overlay)
+        panel = np.concatenate(panels, axis=1)
         writer.write(cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
 
     writer.release()
-    print(f"Saved: {output_path} ({n_frames} frames)")
+    mode = "3-panel" if has_post else "2-panel"
+    print(f"Saved: {output_path} ({n_frames} frames, {mode})")
 
 
 if __name__ == "__main__":

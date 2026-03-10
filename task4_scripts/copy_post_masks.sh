@@ -4,8 +4,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # Paths
-SAM3_OUTPUT_DIR="/localhome/local-vennw/code/task4-2_022602270305_merged/sam3_output"
-DATASET_ROOT="/localhome/local-vennw/code/task4-2_022602270305_merged"
+SAM3_OUTPUT_DIR="/localhome/local-vennw/code/task4-2_0226022703050309_merged/sam3_output"
+DATASET_ROOT="/localhome/local-vennw/code/task4-2_0226022703050309_merged"
 
 # Set to true to overwrite existing masks in dataset_root/masks
 OVERWRITE=true
