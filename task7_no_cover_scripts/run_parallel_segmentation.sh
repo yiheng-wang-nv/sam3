@@ -9,7 +9,7 @@ SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
 # ──────────────── Configuration ────────────────
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-DATASET_DIR="/localhome/local-vennw/code/task7_03030306_nocover_merged"
+DATASET_DIR="/localhome/local-vennw/code/task7_03030306031203130315_nocover_merged"
 CHUNKS=("chunk-000")
 
 HEAD_LEFT_CAMERA="observation.images.head_left_camera_color_optical_frame"
@@ -26,7 +26,7 @@ CAMERAS=(
 
 PROMPTS=("blue table" "robotic arm(s)" "silver box" "metal items")
 
-GPU_IDS="0 1 2 3 5 6 7"
+GPU_IDS="1 2 3 4 5 6 7"
 WORKERS_PER_GPU=2
 PP_OVERWRITE=false
 

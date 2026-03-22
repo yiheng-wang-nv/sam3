@@ -501,6 +501,11 @@ def parse_args():
     parser.add_argument("--pp_leftmost_rect_fill", type=int, default=5)
     parser.add_argument("--pp_leftmost_rect_y_max", type=int, default=420)
     parser.add_argument("--pp_leftmost_rect_skip_label", type=int, default=3)
+    parser.add_argument("--pp_halves_rect", action="store_true",
+                        help="First half: topleft rect fill. Second half: topleft-topright rect fill.")
+    parser.add_argument("--pp_halves_rect_label", type=int, default=1)
+    parser.add_argument("--pp_halves_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_halves_rect_y_max", type=int, default=420)
     return parser.parse_args()
 
 def propagate_in_video(predictor, session_id, max_frames=None, direction="both"):
@@ -591,6 +596,10 @@ def _run_postprocess_only(args):
         leftmost_rect_fill=args.pp_leftmost_rect_fill,
         leftmost_rect_y_max=args.pp_leftmost_rect_y_max,
         leftmost_rect_skip_label=args.pp_leftmost_rect_skip_label,
+        halves_rect_enabled=args.pp_halves_rect,
+        halves_rect_label=args.pp_halves_rect_label,
+        halves_rect_fill=args.pp_halves_rect_fill,
+        halves_rect_y_max=args.pp_halves_rect_y_max,
     )
 
     np.savez_compressed(post_npz_path, arr_0=processed)
@@ -1155,6 +1164,10 @@ def process_single_video(video_predictor, args):
             leftmost_rect_fill=args.pp_leftmost_rect_fill,
             leftmost_rect_y_max=args.pp_leftmost_rect_y_max,
             leftmost_rect_skip_label=args.pp_leftmost_rect_skip_label,
+            halves_rect_enabled=args.pp_halves_rect,
+            halves_rect_label=args.pp_halves_rect_label,
+            halves_rect_fill=args.pp_halves_rect_fill,
+            halves_rect_y_max=args.pp_halves_rect_y_max,
         )
         vis_outputs = label_masks_to_outputs(processed, frame_indices)
 

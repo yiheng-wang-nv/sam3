@@ -1,29 +1,76 @@
 #!/bin/bash
 
-# Get the directory where this script is located
+# Run full parallel segmentation on task4-2 (all episodes, selected cameras).
+
+set -euo pipefail
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SAM3_DIR="$( cd "${SCRIPT_DIR}/.." && pwd )"
 
-# Configuration
+# ──────────────── Configuration ────────────────
 CHECKPOINT="${SAM3_DIR}/sam3.pt"
-BASE_DIR="/localhome/local-vennw/code/task5-2_013002030204021002140309_merged/videos/chunk-000"
-BASE_OUTPUT_DIR="/localhome/local-vennw/code/task5-2_013002030204021002140309_merged/sam3_output"
+DATASET_DIR="/localhome/local-vennw/code/task5-2_030203090311031303140315_newinitpose_merged"
+CHUNKS=("chunk-000" "chunk-001")
 
-# Prompts (per camera)
-HEAD_RIGHT_PROMPTS=("blue table" "robotic arm(s)")
-RIGHT_ARM_PROMPTS=("blue table" "robotic arm(s)" "silver box" "tools")
-
-# Camera names
 HEAD_RIGHT_CAMERA="observation.images.head_right_camera_color_optical_frame"
+LEFT_ARM_CAMERA="observation.images.left_arm_camera_color_optical_frame"
 RIGHT_ARM_CAMERA="observation.images.right_arm_camera_color_optical_frame"
 
-# GPU Selection
-GPU_IDS="0 1 2 3 5 6 7"
-WORKERS_PER_GPU=2
-SKIP_IF_MASKS_DIR="/localhome/local-vennw/code/task5-2_013002030204021002140309_merged/masks"
+CAMERAS=(
+    "$HEAD_RIGHT_CAMERA"
+    "$LEFT_ARM_CAMERA"
+    "$RIGHT_ARM_CAMERA"
+)
 
-# Postprocess settings (shared)
-PP_NUM_WORKERS=128
+GPU_IDS="1 2 3 4 5 6 7"
+WORKERS_PER_GPU=2
+PP_OVERWRITE=false
+
+# ── Per-camera prompts ──
+get_camera_prompts() {
+  local cam="$1"
+  case "$cam" in
+    "$RIGHT_ARM_CAMERA")
+      REPLY_PROMPTS=("blue table" "metal items" "robotic arm(s)" "blue item")
+      ;;
+    "$LEFT_ARM_CAMERA")
+      REPLY_PROMPTS=("blue table" "metal items" "robotic arm(s)" "tools")
+      ;;
+    "$HEAD_RIGHT_CAMERA")
+      REPLY_PROMPTS=("blue table" "metal items" "robot" "blue item")
+      ;;
+    *)
+      REPLY_PROMPTS=("blue table" "metal items" "robotic arm(s)")
+      ;;
+  esac
+}
+
+# ── Per-camera point clicks ──
+get_camera_point_clicks() {
+  local cam="$1"
+  case "$cam" in
+    "$RIGHT_ARM_CAMERA")
+      echo "${SCRIPT_DIR}/point_clicks_right_arm.json"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+# ── Per-camera extra PP flags ──
+get_camera_pp_extra() {
+  local cam="$1"
+  REPLY_PP_EXTRA=()
+  case "$cam" in
+    # "$RIGHT_ARM_CAMERA")
+    #   REPLY_PP_EXTRA=(--pp_halves_rect --pp_halves_rect_label 1 --pp_halves_rect_fill 5 --pp_halves_rect_y_max 420)
+    #   ;;
+  esac
+}
+
+# ── Postprocess settings (shared) ──
+PP_NUM_WORKERS=96
 PP_MIN_HOLE_SIZE=64
 PP_MIN_OBJECT_SIZE=50
 PP_CLOSING_ITERATIONS=1
@@ -31,100 +78,86 @@ PP_NO_REMOVE_SMALL_OBJECTS=true
 PP_UNION_HOLE_FILL=true
 PP_UNION_GAP_FILL=true
 PP_UNION_GAP_CLOSING_ITERATIONS=1
+PP_FILL_CLASS="1,2,3,4"
+PP_FILL_TARGET=5
 
-# Interior fill (per camera)
-HEAD_RIGHT_FILL_CLASS="1,2"
-HEAD_RIGHT_FILL_TARGET=3
-RIGHT_ARM_FILL_CLASS="1,2,3,4"
-RIGHT_ARM_FILL_TARGET=5
+# ──────────────── Build common PP flags ────────────────
+build_pp_flags() {
+  local fill_class="$1"
+  local fill_target="$2"
+  PP_FLAGS=(
+    --pp_num_workers "$PP_NUM_WORKERS"
+    --pp_min_hole_size "$PP_MIN_HOLE_SIZE"
+    --pp_min_object_size "$PP_MIN_OBJECT_SIZE"
+    --pp_closing_iterations "$PP_CLOSING_ITERATIONS"
+  )
+  [ "$PP_OVERWRITE" = true ] && PP_FLAGS+=(--pp_overwrite)
+  [ "$PP_NO_REMOVE_SMALL_OBJECTS" = true ] && PP_FLAGS+=(--pp_no_remove_small_objects)
+  [ "$PP_UNION_HOLE_FILL" = true ] && PP_FLAGS+=(--pp_union_hole_fill)
+  if [ "$PP_UNION_GAP_FILL" = true ]; then
+    PP_FLAGS+=(--pp_union_gap_fill --pp_union_gap_closing_iterations "$PP_UNION_GAP_CLOSING_ITERATIONS")
+  fi
+  if [ -n "$fill_class" ]; then
+    PP_FLAGS+=(--pp_fill_interior_class "$fill_class" --pp_fill_interior_target "$fill_target")
+  fi
+}
 
-# Scanline fill: fill background between first/last table pixels per row (head right only)
-PP_SCANLINE_FILL=true
-PP_SCANLINE_SOURCE_LABEL=1
-PP_SCANLINE_FILL_VALUE=3
+# ──────────────── Header ────────────────
+echo "🚀 Starting Parallel Segmentation Job (task4-2)"
+echo "--------------------------------------------------------------"
+echo "SAM3 Dir:    $SAM3_DIR"
+echo "Dataset:     $DATASET_DIR"
+echo "Chunks:      ${CHUNKS[*]}"
+echo "Cameras:     ${CAMERAS[*]}"
+echo "GPUs:        ${GPU_IDS}"
+echo "Workers/GPU: ${WORKERS_PER_GPU}"
+echo "--------------------------------------------------------------"
 
-# Topleft rect fill (right arm only, frame 10 to 2/3)
-RIGHT_ARM_TOPLEFT_RECT=true
-RIGHT_ARM_TOPLEFT_RECT_LABEL=1
-RIGHT_ARM_TOPLEFT_RECT_FILL=5
-RIGHT_ARM_TOPLEFT_RECT_Y_MAX=420
-RIGHT_ARM_TOPLEFT_RECT_FRAME_START=10
-RIGHT_ARM_TOPLEFT_RECT_FRAME_END_RATIO=0.667
+# ──────────────── Run each chunk × camera ────────────────
+for chunk in "${CHUNKS[@]}"; do
+  BASE_DIR="${DATASET_DIR}/videos/${chunk}"
+  BASE_OUTPUT_DIR="${DATASET_DIR}/sam3_output"
 
-# Topright rect fill (right arm only, 2/3 to end)
-RIGHT_ARM_TOPRIGHT_RECT=true
-RIGHT_ARM_TOPRIGHT_RECT_LABEL=2
-RIGHT_ARM_TOPRIGHT_RECT_FILL=5
-RIGHT_ARM_TOPRIGHT_RECT_Y_MAX=420
-RIGHT_ARM_TOPRIGHT_RECT_Y_THRESHOLD=200
-RIGHT_ARM_TOPRIGHT_RECT_FRAME_START_RATIO=0.667
+  if [ ! -d "$BASE_DIR" ]; then
+    echo "⚠️  Skipping ${chunk}: ${BASE_DIR} not found"
+    continue
+  fi
 
-echo "🚀 Starting Parallel Segmentation Job (task5)"
-echo "--------------------------------------------------------------------"
-echo "SAM3 Dir:  $SAM3_DIR"
-echo "Base Dir:  $BASE_DIR"
-echo "Output:    $BASE_OUTPUT_DIR"
-echo "GPUs:      ${GPU_IDS}"
-echo "Scanline fill: head right only ($PP_SCANLINE_SOURCE_LABEL->$PP_SCANLINE_FILL_VALUE)"
-echo "Postprocess: union_hole_fill, union_gap_fill(iter=$PP_UNION_GAP_CLOSING_ITERATIONS)"
-echo "  head_right fill_interior: $HEAD_RIGHT_FILL_CLASS->$HEAD_RIGHT_FILL_TARGET"
-echo "  right_arm  fill_interior: $RIGHT_ARM_FILL_CLASS->$RIGHT_ARM_FILL_TARGET"
-echo "--------------------------------------------------------------------"
+  echo "============================================================"
+  echo "  Processing ${chunk}"
+  echo "============================================================"
 
-PP_COMMON_ARGS=(
-  --save_npz
-  --no_pkl
-  --skip_if_exists
-  --postprocess
-  --pp_num_workers "$PP_NUM_WORKERS"
-  --pp_min_hole_size "$PP_MIN_HOLE_SIZE"
-  --pp_min_object_size "$PP_MIN_OBJECT_SIZE"
-  --pp_closing_iterations "$PP_CLOSING_ITERATIONS"
-  $( [ "$PP_NO_REMOVE_SMALL_OBJECTS" = true ] && echo "--pp_no_remove_small_objects" )
-  $( [ "$PP_UNION_HOLE_FILL" = true ] && echo "--pp_union_hole_fill" )
-  $( [ "$PP_UNION_GAP_FILL" = true ] && echo "--pp_union_gap_fill" )
-  $( [ "$PP_UNION_GAP_FILL" = true ] && echo "--pp_union_gap_closing_iterations $PP_UNION_GAP_CLOSING_ITERATIONS" )
-  --pp_overwrite
-  --gpu_ids $GPU_IDS
-  --workers_per_gpu "$WORKERS_PER_GPU"
-  --skip_if_masks_dir "$SKIP_IF_MASKS_DIR"
-)
+  for cam in "${CAMERAS[@]}"; do
+    get_camera_prompts "$cam"
+    local_point_clicks=$(get_camera_point_clicks "$cam")
+    get_camera_pp_extra "$cam"
+    build_pp_flags "$PP_FILL_CLASS" "$PP_FILL_TARGET"
 
-echo "-> Running head right camera (with scanline fill)"
-python "${SAM3_DIR}/batch_run_parallel.py" \
-  --base_dir "$BASE_DIR" \
-  --checkpoint "$CHECKPOINT" \
-  --output_dir "$BASE_OUTPUT_DIR" \
-  --cameras "$HEAD_RIGHT_CAMERA" \
-  --prompts "${HEAD_RIGHT_PROMPTS[@]}" \
-  $( [ "$PP_SCANLINE_FILL" = true ] && echo "--pp_scanline_fill" ) \
-  $( [ "$PP_SCANLINE_FILL" = true ] && echo "--pp_scanline_source_label $PP_SCANLINE_SOURCE_LABEL" ) \
-  $( [ "$PP_SCANLINE_FILL" = true ] && echo "--pp_scanline_fill_value $PP_SCANLINE_FILL_VALUE" ) \
-  --pp_fill_interior_class "$HEAD_RIGHT_FILL_CLASS" \
-  --pp_fill_interior_target "$HEAD_RIGHT_FILL_TARGET" \
-  "${PP_COMMON_ARGS[@]}"
+    CAM_FLAGS=()
+    if [ -n "$local_point_clicks" ] && [ -f "$local_point_clicks" ]; then
+      CAM_FLAGS+=(--point_clicks_json "$local_point_clicks")
+      echo "  [$cam] Point clicks: $local_point_clicks"
+    fi
 
-echo "-> Running right arm camera"
-python "${SAM3_DIR}/batch_run_parallel.py" \
-  --base_dir "$BASE_DIR" \
-  --checkpoint "$CHECKPOINT" \
-  --output_dir "$BASE_OUTPUT_DIR" \
-  --cameras "$RIGHT_ARM_CAMERA" \
-  --prompts "${RIGHT_ARM_PROMPTS[@]}" \
-  --pp_fill_interior_class "$RIGHT_ARM_FILL_CLASS" \
-  --pp_fill_interior_target "$RIGHT_ARM_FILL_TARGET" \
-  $( [ "$RIGHT_ARM_TOPLEFT_RECT" = true ] && echo "--pp_topleft_rect" ) \
-  $( [ "$RIGHT_ARM_TOPLEFT_RECT" = true ] && echo "--pp_topleft_rect_label $RIGHT_ARM_TOPLEFT_RECT_LABEL" ) \
-  $( [ "$RIGHT_ARM_TOPLEFT_RECT" = true ] && echo "--pp_topleft_rect_fill $RIGHT_ARM_TOPLEFT_RECT_FILL" ) \
-  $( [ "$RIGHT_ARM_TOPLEFT_RECT" = true ] && echo "--pp_topleft_rect_y_max $RIGHT_ARM_TOPLEFT_RECT_Y_MAX" ) \
-  $( [ "$RIGHT_ARM_TOPLEFT_RECT" = true ] && echo "--pp_topleft_rect_frame_start $RIGHT_ARM_TOPLEFT_RECT_FRAME_START" ) \
-  $( [ "$RIGHT_ARM_TOPLEFT_RECT" = true ] && echo "--pp_topleft_rect_frame_end_ratio $RIGHT_ARM_TOPLEFT_RECT_FRAME_END_RATIO" ) \
-  $( [ "$RIGHT_ARM_TOPRIGHT_RECT" = true ] && echo "--pp_topright_rect" ) \
-  $( [ "$RIGHT_ARM_TOPRIGHT_RECT" = true ] && echo "--pp_topright_rect_label $RIGHT_ARM_TOPRIGHT_RECT_LABEL" ) \
-  $( [ "$RIGHT_ARM_TOPRIGHT_RECT" = true ] && echo "--pp_topright_rect_fill $RIGHT_ARM_TOPRIGHT_RECT_FILL" ) \
-  $( [ "$RIGHT_ARM_TOPRIGHT_RECT" = true ] && echo "--pp_topright_rect_y_max $RIGHT_ARM_TOPRIGHT_RECT_Y_MAX" ) \
-  $( [ "$RIGHT_ARM_TOPRIGHT_RECT" = true ] && echo "--pp_topright_rect_y_threshold $RIGHT_ARM_TOPRIGHT_RECT_Y_THRESHOLD" ) \
-  $( [ "$RIGHT_ARM_TOPRIGHT_RECT" = true ] && echo "--pp_topright_rect_frame_start_ratio $RIGHT_ARM_TOPRIGHT_RECT_FRAME_START_RATIO" ) \
-  "${PP_COMMON_ARGS[@]}"
+    echo "-> [${chunk}] Running ${cam}"
+    echo "   Prompts: ${REPLY_PROMPTS[*]}"
+
+    python "${SAM3_DIR}/batch_run_parallel.py" \
+      --base_dir "$BASE_DIR" \
+      --checkpoint "$CHECKPOINT" \
+      --output_dir "$BASE_OUTPUT_DIR" \
+      --cameras "$cam" \
+      --prompts "${REPLY_PROMPTS[@]}" \
+      --save_npz \
+      --no_pkl \
+      --postprocess \
+      --skip_if_exists \
+      "${PP_FLAGS[@]}" \
+      "${REPLY_PP_EXTRA[@]}" \
+      "${CAM_FLAGS[@]}" \
+      --gpu_ids $GPU_IDS \
+      --workers_per_gpu "$WORKERS_PER_GPU"
+  done
+done
 
 echo "🎉 Batch segmentation job finished!"

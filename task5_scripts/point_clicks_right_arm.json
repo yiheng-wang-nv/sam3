@@ -1,0 +1,21 @@
+{
+    "observation.images.right_arm_camera_color_optical_frame": {
+        "_default": [
+            {
+                "assist_prompt_idx": 0,
+                "frame_idx": 0,
+                "points": "35.5,224.2;35.5,205"
+            },
+            {
+                "assist_prompt_idx": 2,
+                "frame_idx": 0,
+                "points": "431.3,326.0;338.5,379.6;183.7,371.2"
+            },
+            {
+                "assist_prompt_idx": 1,
+                "frame_idx": -1,
+                "points": "326,313"
+            }
+        ]
+    }
+}

@@ -406,6 +406,56 @@ def fill_bg_topleft_rect(mask, source_label, fill_value, y_max):
     return result
 
 
+def fill_bg_topright_left_below(mask, source_label, fill_value, y_max):
+    """
+    Find the top-right corner of source_label (max x, then min y among those),
+    fill all background (0) in the rectangle (0, y) to (x, y_max) with fill_value.
+    """
+    coords = np.argwhere(mask == source_label)
+    if coords.size == 0:
+        return mask
+    ys = coords[:, 0]
+    xs = coords[:, 1]
+    max_x = int(xs.max())
+    min_y = int(ys[xs == max_x].min())
+    h = mask.shape[0]
+    y_end = min(y_max + 1, h)
+    if min_y >= y_end or max_x <= 0:
+        return mask
+    result = mask.copy()
+    roi = result[min_y:y_end, 0:max_x + 1]
+    roi[roi == 0] = fill_value
+    return result
+
+
+def fill_bg_topleft_topright_rect(mask, source_label, fill_value, y_max):
+    """
+    Find both the top-left and top-right corners of source_label,
+    fill all background (0) in the rectangle between them down to y_max.
+    Top-left: min y, then min x among those.
+    Top-right: max x, then min y among those.
+    """
+    coords = np.argwhere(mask == source_label)
+    if coords.size == 0:
+        return mask
+    ys = coords[:, 0]
+    xs = coords[:, 1]
+    min_y = int(ys.min())
+    tl_x = int(xs[ys == min_y].min())
+    max_x = int(xs.max())
+    tr_y = int(ys[xs == max_x].min())
+
+    h = mask.shape[0]
+    y_start = min(min_y, tr_y)
+    y_end = min(y_max + 1, h)
+    if y_start >= y_end or tl_x >= max_x:
+        return mask
+    result = mask.copy()
+    roi = result[y_start:y_end, tl_x:max_x + 1]
+    roi[roi == 0] = fill_value
+    return result
+
+
 def fill_bg_topright_rect(mask, source_label, fill_value, y_max, y_threshold=200):
     """
     For all source_label pixels with y < y_threshold, fill the union of
@@ -582,6 +632,10 @@ def postprocess_video_masks(masks,
                             corner_rect_fill=4,
                             corner_rect_y_max=420,
                             corner_rect_x_first_labels=None,
+                            halves_rect_enabled=False,
+                            halves_rect_label=1,
+                            halves_rect_fill=5,
+                            halves_rect_y_max=420,
                             temporal_fill_enabled=False,
                             temporal_fill_labels=None,
                             temporal_fill_union_labels=None,
@@ -764,6 +818,16 @@ def postprocess_video_masks(masks,
                     corner_rect_y_max, corner_rect_mode, x_first=use_x_first
                 )
 
+        if halves_rect_enabled:
+            if t < T // 2:
+                processed_frame = fill_bg_topright_left_below(
+                    processed_frame, halves_rect_label, halves_rect_fill, halves_rect_y_max
+                )
+            else:
+                processed_frame = fill_bg_topleft_topright_rect(
+                    processed_frame, halves_rect_label, halves_rect_fill, halves_rect_y_max
+                )
+
         result[t] = processed_frame
 
     if temporal_fill_enabled:
@@ -820,6 +884,7 @@ def _process_single_file(args_tuple):
      leftmost_rect_y_max, leftmost_rect_skip_label,
      corner_rect_enabled, corner_rect_mode, corner_rect_labels,
      corner_rect_fill, corner_rect_y_max, corner_rect_x_first_labels,
+     halves_rect_enabled, halves_rect_label, halves_rect_fill, halves_rect_y_max,
      temporal_fill_enabled, temporal_fill_labels, temporal_fill_union_labels,
      temporal_fill_value) = args_tuple
 
@@ -891,6 +956,10 @@ def _process_single_file(args_tuple):
         corner_rect_fill=corner_rect_fill,
         corner_rect_y_max=corner_rect_y_max,
         corner_rect_x_first_labels=corner_rect_x_first_labels,
+        halves_rect_enabled=halves_rect_enabled,
+        halves_rect_label=halves_rect_label,
+        halves_rect_fill=halves_rect_fill,
+        halves_rect_y_max=halves_rect_y_max,
         temporal_fill_enabled=temporal_fill_enabled,
         temporal_fill_labels=temporal_fill_labels,
         temporal_fill_union_labels=temporal_fill_union_labels,
@@ -955,6 +1024,10 @@ def process_directory(input_dir: Path,
                       corner_rect_fill=4,
                       corner_rect_y_max=420,
                       corner_rect_x_first_labels=None,
+                      halves_rect_enabled=False,
+                      halves_rect_label=1,
+                      halves_rect_fill=5,
+                      halves_rect_y_max=420,
                       temporal_fill_enabled=False,
                       temporal_fill_labels=None,
                       temporal_fill_union_labels=None,
@@ -1002,6 +1075,7 @@ def process_directory(input_dir: Path,
          leftmost_rect_y_max, leftmost_rect_skip_label,
          corner_rect_enabled, corner_rect_mode, corner_rect_labels,
          corner_rect_fill, corner_rect_y_max, corner_rect_x_first_labels,
+         halves_rect_enabled, halves_rect_label, halves_rect_fill, halves_rect_y_max,
          temporal_fill_enabled, temporal_fill_labels, temporal_fill_union_labels,
          temporal_fill_value)
         for mask_file in mask_files
@@ -1231,6 +1305,14 @@ def main():
     parser.add_argument('--corner_rect_x_first_labels', type=str, default=None,
                         help='Comma-separated labels that use x-first anchor (extremal x, then min y). '
                              'Other labels use y-first (min y, then extremal x). E.g. "3".')
+    parser.add_argument('--halves_rect', action='store_true',
+                        help='First half: topleft rect fill. Second half: topleft-topright rect fill.')
+    parser.add_argument('--halves_rect_label', type=int, default=1,
+                        help='Source label for halves_rect (default: 1).')
+    parser.add_argument('--halves_rect_fill', type=int, default=5,
+                        help='Fill value for halves_rect (default: 5).')
+    parser.add_argument('--halves_rect_y_max', type=int, default=420,
+                        help='Bottom boundary for halves_rect (default: 420).')
     parser.add_argument('--temporal_fill', action='store_true',
                         help='Forward temporal fill: if pixel has source label in frame N and is 0 in frame N+1, fill with target.')
     parser.add_argument('--temporal_fill_labels', type=str, default=None,
@@ -1362,6 +1444,10 @@ def main():
                 corner_rect_fill=args.corner_rect_fill,
                 corner_rect_y_max=args.corner_rect_y_max,
                 corner_rect_x_first_labels=[int(x) for x in args.corner_rect_x_first_labels.split(",")] if args.corner_rect_x_first_labels else None,
+                halves_rect_enabled=args.halves_rect,
+                halves_rect_label=args.halves_rect_label,
+                halves_rect_fill=args.halves_rect_fill,
+                halves_rect_y_max=args.halves_rect_y_max,
                 temporal_fill_enabled=args.temporal_fill,
                 temporal_fill_labels=[int(x) for x in args.temporal_fill_labels.split(",")] if args.temporal_fill_labels else None,
                 temporal_fill_union_labels=[int(x) for x in args.temporal_fill_union_labels.split(",")] if args.temporal_fill_union_labels else None,

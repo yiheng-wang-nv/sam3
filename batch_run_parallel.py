@@ -119,6 +119,10 @@ def run_worker(
     pp_leftmost_rect_fill=5,
     pp_leftmost_rect_y_max=420,
     pp_leftmost_rect_skip_label=3,
+    pp_halves_rect=False,
+    pp_halves_rect_label=1,
+    pp_halves_rect_fill=5,
+    pp_halves_rect_y_max=420,
     point_clicks=None,
     prompt_extra_frames_str="",
 ):
@@ -311,6 +315,13 @@ def run_worker(
                     "--pp_leftmost_rect_y_max", str(pp_leftmost_rect_y_max),
                     "--pp_leftmost_rect_skip_label", str(pp_leftmost_rect_skip_label),
                 ]
+            if pp_halves_rect:
+                cmd += [
+                    "--pp_halves_rect",
+                    "--pp_halves_rect_label", str(pp_halves_rect_label),
+                    "--pp_halves_rect_fill", str(pp_halves_rect_fill),
+                    "--pp_halves_rect_y_max", str(pp_halves_rect_y_max),
+                ]
 
         try:
             subprocess.run(cmd, env=env, check=True)
@@ -440,6 +451,10 @@ def run_worker_batch(
     pp_leftmost_rect_fill,
     pp_leftmost_rect_y_max,
     pp_leftmost_rect_skip_label,
+    pp_halves_rect,
+    pp_halves_rect_label,
+    pp_halves_rect_fill,
+    pp_halves_rect_y_max,
     points=None,
     point_labels=None,
     points_frame_idx=None,
@@ -581,6 +596,10 @@ def run_worker_batch(
             pp_leftmost_rect_fill=pp_leftmost_rect_fill,
             pp_leftmost_rect_y_max=pp_leftmost_rect_y_max,
             pp_leftmost_rect_skip_label=pp_leftmost_rect_skip_label,
+            pp_halves_rect=pp_halves_rect,
+            pp_halves_rect_label=pp_halves_rect_label,
+            pp_halves_rect_fill=pp_halves_rect_fill,
+            pp_halves_rect_y_max=pp_halves_rect_y_max,
         )
 
         print(f"[Worker GPU {gpu_id}] ({vid_idx+1}/{len(video_list)}) {video_path}")
@@ -665,6 +684,11 @@ if __name__ == "__main__":
     parser.add_argument("--pp_leftmost_rect_fill", type=int, default=5)
     parser.add_argument("--pp_leftmost_rect_y_max", type=int, default=420)
     parser.add_argument("--pp_leftmost_rect_skip_label", type=int, default=3)
+    parser.add_argument("--pp_halves_rect", action="store_true",
+                        help="First half: topleft rect fill. Second half: topleft-topright rect fill.")
+    parser.add_argument("--pp_halves_rect_label", type=int, default=1)
+    parser.add_argument("--pp_halves_rect_fill", type=int, default=5)
+    parser.add_argument("--pp_halves_rect_y_max", type=int, default=420)
     parser.add_argument("--pp_overwrite", action="store_true", help="Postprocess: overwrite existing *_masks_post.npz.")
     parser.add_argument(
         "--pp_per_camera",
@@ -891,6 +915,10 @@ if __name__ == "__main__":
                         args.pp_leftmost_rect_fill,
                         args.pp_leftmost_rect_y_max,
                         args.pp_leftmost_rect_skip_label,
+                        args.pp_halves_rect,
+                        args.pp_halves_rect_label,
+                        args.pp_halves_rect_fill,
+                        args.pp_halves_rect_y_max,
                         point_clicks,
                         prompt_extra_frames_str,
                     )
@@ -955,6 +983,10 @@ if __name__ == "__main__":
                         args.pp_leftmost_rect_fill,
                         args.pp_leftmost_rect_y_max,
                         args.pp_leftmost_rect_skip_label,
+                        args.pp_halves_rect,
+                        args.pp_halves_rect_label,
+                        args.pp_halves_rect_fill,
+                        args.pp_halves_rect_y_max,
                         args.points,
                         args.point_labels,
                         args.points_frame_idx,
@@ -1074,6 +1106,10 @@ if __name__ == "__main__":
                         leftmost_rect_fill=args.pp_leftmost_rect_fill,
                         leftmost_rect_y_max=args.pp_leftmost_rect_y_max,
                         leftmost_rect_skip_label=args.pp_leftmost_rect_skip_label,
+                        halves_rect_enabled=args.pp_halves_rect,
+                        halves_rect_label=args.pp_halves_rect_label,
+                        halves_rect_fill=args.pp_halves_rect_fill,
+                        halves_rect_y_max=args.pp_halves_rect_y_max,
                         corner_rect_enabled=args.pp_corner_rect,
                         corner_rect_mode=args.pp_corner_rect_mode,
                         corner_rect_labels=[int(x) for x in args.pp_corner_rect_labels.split(",")] if args.pp_corner_rect_labels else None,

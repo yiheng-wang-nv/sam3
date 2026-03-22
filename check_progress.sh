@@ -3,7 +3,7 @@
 #   dataset_dir: root dataset directory (default: task7_03030306_nocover_merged)
 #   Checks both dataset_dir/sam3_output/ and dataset_dir/masks/chunk-*/
 
-DATASET_DIR="${1:-/localhome/local-vennw/code/task4-2_0226022703050309_merged}"
+DATASET_DIR="${1:-/localhome/local-vennw/code/task5-2_030203090311031303140315_newinitpose_merged}"
 OUTPUT_DIR="${DATASET_DIR}/sam3_output"
 MASKS_DIR="${DATASET_DIR}/masks"
 
